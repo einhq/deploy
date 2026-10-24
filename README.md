@@ -13,8 +13,8 @@ the modules are added to it with options, at the first install or any time after
 ```bash
 ./setup.sh --ems              # the media service: every media tool and model, an image of about 30 GB
 ./setup.sh --llm              # the assistant's language model, Qwen3.5-4B in llama.cpp
-./setup.sh --module archive   # a module, cloned into modules/ with the modules it needs (archive needs ems)
-./setup.sh                    # update: the newest sources of everything here, rebuilt and restarted
+./setup.sh --module archive   # a module, which EiN installs at its start with the modules it needs (archive needs ems)
+./setup.sh                    # update: the newest sources of EiN and its services, rebuilt and restarted
 ```
 
 The installer passes the same options on: `curl … | bash -s -- --ems --module archive`. An option
@@ -29,13 +29,12 @@ ein.Containerfile     core's own image with the web interface built in
 setup.sh              fetches the sources, writes .env and compose.override.yaml, builds, starts
 
 src/                  the sources setup.sh builds: core, db, and ems and llm with their options
-modules/              the modules, mounted into EiN and set up at every start
 .env                  the settings, with the passwords made at the install
 compose.override.yaml the options in .env as services, written by setup.sh
-data/                 your files, unless EIN_DATA named another folder at the install
+data/                 your files and the installed modules, unless EIN_DATA named another folder at the install
 ```
 
-The last five are made here and are not in the repository. Back up `.env` and the data folder; the
+The last four are made here and are not in the repository. Back up `.env` and the data folder; the
 database is the `ein_db` volume of the container engine.
 
 ## Running it
@@ -56,6 +55,16 @@ database, the media service and the model are reached only by EiN, on the compos
 
 A new instance prints its admin password once, and `setup.sh` shows it at the end; sign in as
 `admin` and change it.
+
+## Modules
+
+EiN installs its modules itself, from their repositories (`einhq/module-<name>` on GitHub), into
+`modules/` in the data folder, which is mounted into EiN, so they stay when EiN is updated or its
+container is made again. `EIN_MODULES` in `.env` names the ones it installs at its start when they
+are missing, with the modules they need; `--module` adds one there. Settings → Modules in the web
+interface lists every published module, and installs, updates and removes them; `mod search` and
+`mod install` in EiN's shell do the same. `setup.sh` does not update a module: Settings → Modules
+does.
 
 ## Settings
 

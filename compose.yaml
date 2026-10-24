@@ -36,11 +36,12 @@ services:
       timeout: 5s
       retries: 60
 
-  # The modules are the folders in modules/, mounted read-only and set up at every start; setup.sh
-  # --module adds one. The four data folders are mounted at the paths the media service mounts them
-  # at, so a path EiN resolves is the path it opens: /files the originals, /old older originals,
-  # /files-volatile the renditions, /files-tmp scratch space. `z` labels them shared under SELinux
-  # and is ignored elsewhere.
+  # The modules are EiN's to install, into the modules folder under EIN_DATA, which keeps them
+  # across updates: the ones EIN_MODULES names (setup.sh --module adds one) at its start when they
+  # are missing, and any other from Settings → Modules. The four data folders are mounted at the
+  # paths the media service mounts them at, so a path EiN resolves is the path it opens: /files the
+  # originals, /old older originals, /files-volatile the renditions, /files-tmp scratch space. `z`
+  # labels them shared under SELinux and is ignored elsewhere.
   ein:
     # On core's own image, which setup.sh builds first as localhost/ein-core.
     build:
@@ -57,7 +58,8 @@ services:
       CFG_EMS_URL: http://ems:8181
       CFG_EMS_KEY: ${EMS_KEY:?run setup.sh, which writes .env}
       CFG_LLM_URL: ${CFG_LLM_URL:-http://llm:8190}
-      DEV_MODULES_PATH: /modules
+      MODULE_INSTALL_PATH: /modules-installed
+      INSTALL_MODULES: ${EIN_MODULES:-}
       FILE_ROOT_PATH: /files
       VOLATILE_FILE_ROOT_PATH: /files-volatile
       FILE_TMP_PATH: /files-tmp
@@ -67,8 +69,8 @@ services:
       - ${EIN_BIND:-0.0.0.0}:${EIN_HTTP_PORT:-8080}:8080
       - ${EIN_BIND:-0.0.0.0}:${EIN_SSH_PORT:-2222}:2222
     volumes:
-      - ./modules:/modules:ro,z
-      - ${EIN_DATA:?run setup.sh, which writes .env}/files:/files:z
+      - ${EIN_DATA:?run setup.sh, which writes .env}/modules:/modules-installed:z
+      - ${EIN_DATA}/files:/files:z
       - ${EIN_DATA}/old:/old:z
       - ${EIN_DATA}/files-volatile:/files-volatile:z
       - ${EIN_DATA}/files-tmp:/files-tmp:z

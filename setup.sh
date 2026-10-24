@@ -5,7 +5,7 @@
 #   ./setup.sh                    EiN and its database; run again, the newest sources of what is here
 #   ./setup.sh --ems              also the media service: every media tool and model, about 30 GB
 #   ./setup.sh --llm              also the assistant's language model
-#   ./setup.sh --module archive   also a module, cloned into modules/ with the modules it needs
+#   ./setup.sh --module archive   also a module, which EiN installs at its start with the modules it needs
 #   ./setup.sh --no-ems --no-llm  leave an option out again; its data stays
 #
 # An option once chosen is kept in .env, so a later run without it keeps it. With podman or Docker,
@@ -22,8 +22,6 @@ cd "$here"
 
 main() {
   local want_ems= want_llm= modules=()
-  # The modules cloned in this run, which need no pull after.
-  declare -gA added=()
   while [ $# -gt 0 ]; do
     case $1 in
       --ems) want_ems=1 ;;
@@ -48,6 +46,7 @@ main() {
   [ -f .env ] || write_env
   [ -z "$want_ems" ] || set_env EIN_EMS "$want_ems"
   [ -z "$want_llm" ] || set_env EIN_LLM "$want_llm"
+  [ ${#modules[@]} = 0 ] || add_modules "${modules[@]}"
   # shellcheck disable=SC1091
   set -a && . ./.env && set +a
   write_override
@@ -57,19 +56,12 @@ main() {
   fetch db src/db
   [ "$EIN_EMS" != 1 ] || fetch ems src/ems
   [ "$EIN_LLM" != 1 ] || fetch llm src/llm
-  mkdir -p modules
-  local name
-  for name in "${modules[@]}"; do add_module "$name"; done
-  for name in modules/*/; do
-    name=${name%/}
-    if [ -d "$name/.git" ] && [ -z "${added[$name]:-}" ]; then fetch "module-${name#modules/}" "$name"; fi
-  done
 
   step "Building the images$([ "$EIN_EMS" != 1 ] || echo ' (the media service the first time: about 30 GB)')"
   build
 
   step "Starting EiN"
-  mkdir -p "$EIN_DATA"/{files,old,files-volatile,files-tmp,llm}
+  mkdir -p "$EIN_DATA"/{files,old,files-volatile,files-tmp,llm,modules}
   # On an update, --force-recreate: older podman-compose starts the new images only when the config
   # changed. --remove-orphans: an option left out stops its service.
   local recreate=()
@@ -109,7 +101,13 @@ EIN_EMS=0
 EIN_LLM=0
 EIN_GPU=$gpu
 
-# Your originals, the renditions, scratch space and the model, each in a folder of its own here.
+# The modules EiN installs at its start when it lacks them, with the modules they need, into the
+# modules folder under EIN_DATA; setup.sh --module adds one. Settings → Modules lists the published
+# ones, and installs, updates and removes them.
+EIN_MODULES=""
+
+# Your originals, the renditions, scratch space, the model and the modules, each in a folder of its
+# own here.
 EIN_DATA=$data
 POSTGRES_PASSWORD=$(secret)
 EMS_KEY=$(secret)
@@ -173,15 +171,15 @@ fetch() {
   echo "  $1 $(git -C "$2" log -1 --format='%h %cs')"
 }
 
-# A module and, first, the modules its mod.json depends on, each cloned once.
-add_module() {
-  local name=$1 dep
-  if [ -d "modules/$name" ]; then return; fi
-  fetch "module-$name" "modules/$name"
-  added[modules/$name]=1
-  for dep in $(tr -d '\n' <"modules/$name/mod.json" | grep -oE '"dependencies" *: *\{[^}]*\}' | grep -oE '"[a-z0-9-]+" *:' | tr -d '": ' | grep -vx dependencies); do
-    add_module "$dep"
+# Modules added to EIN_MODULES, each once. EiN installs them, and what they need, at its next start.
+add_modules() {
+  local name names
+  read -ra names <<<"$(sed -n 's/^EIN_MODULES=//p' .env | tr -d '"')"
+  for name in "$@"; do
+    [[ $name =~ ^[a-z][a-z0-9-]*$ ]] || fail "--module takes a module's name, such as archive: $name"
+    [[ " ${names[*]} " == *" $name "* ]] || names+=("$name")
   done
+  set_env EIN_MODULES "\"${names[*]}\""
 }
 
 build() {
@@ -196,6 +194,8 @@ build() {
     # What the media service's health reports as its build, as its own Makefile writes it.
     echo "$(git -C src/ems describe --always --dirty) $(git -C src/ems log -1 --format=%cI)" >src/ems/ems/BUILD
   fi
+  # What core's system-info says it runs, as a tree without its .git says it: the commit and its date.
+  git -C src/core log -1 --format='{"commit":"%h","date":"%cI"}' >src/core/src/build.json
   "$engine" build -t localhost/ein-core -f src/core/src/Containerfile src/core
   compose build
 }
