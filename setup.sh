@@ -70,9 +70,11 @@ main() {
 
   step "Starting EiN"
   mkdir -p "$EIN_DATA"/{files,old,files-volatile,files-tmp,llm}
-  # --force-recreate: older podman-compose starts the new images only when the config changed.
-  # --remove-orphans: an option left out stops its service.
-  compose up -d --force-recreate --remove-orphans
+  # On an update, --force-recreate: older podman-compose starts the new images only when the config
+  # changed. --remove-orphans: an option left out stops its service.
+  local recreate=()
+  [ -z "$("$engine" ps -aq --filter label=com.docker.compose.project=ein)" ] || recreate=(--force-recreate)
+  compose up -d "${recreate[@]}" --remove-orphans
   wait_for_ein
 }
 
