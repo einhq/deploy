@@ -1,0 +1,43 @@
+# The assistant's language model, as an option: setup.sh --llm names it in compose.override.yaml,
+# with the graphics card when there is one. llama.cpp's server, fetching the model into EIN_DATA/llm
+# on its first start. On the card it takes the layers that leave LLM_CARD_RESERVE_MB free for the
+# media service; llm's README explains the share.
+services:
+  llm:
+    image: ${LLM_IMAGE:-ghcr.io/ggml-org/llama.cpp:server-cuda@sha256:bfb3264fc2166e01e2b4f9b537e45d7006d87c75021b911f132ef607f5bbced3}
+    restart: unless-stopped
+    environment:
+      LLAMA_CACHE: /models
+    mem_limit: ${LLM_MEMORY:-10g}
+    memswap_limit: ${LLM_MEMORY:-10g}
+    volumes:
+      - ${EIN_DATA}/llm:/models:z
+      - ./src/llm/templates:/templates:ro,z
+    command:
+      - --hf-repo
+      - ${LLM_GGUF_REPO:-unsloth/Qwen3.5-4B-GGUF}
+      - --hf-file
+      - ${LLM_GGUF_FILE:-Qwen3.5-4B-Q8_0.gguf}
+      - --alias
+      - qwen3.5-4b
+      - --host
+      - 0.0.0.0
+      - --port
+      - '8190'
+      - -ngl
+      - auto
+      - --fit
+      - 'on'
+      - --fit-target
+      - ${LLM_CARD_RESERVE_MB:-8800}
+      - -c
+      - '32768'
+      - -np
+      - '1'
+      - --cache-ram
+      - '2048'
+      - --jinja
+      - --chat-template-file
+      - /templates/qwen35-stable-history.jinja
+      - --chat-template-kwargs
+      - '{"enable_thinking": false}'

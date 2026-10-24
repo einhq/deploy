@@ -1,0 +1,29 @@
+# The media service, every media tool and model behind one HTTP API, as an option: setup.sh --ems
+# names it in compose.override.yaml, with the graphics card when there is one. It mounts EiN's four
+# data folders at the same paths EiN does, the originals read-only. It reads .env as its
+# environment, so an EMS_ line added there reaches it at the next `up -d`.
+services:
+  ems:
+    build:
+      context: src/ems
+      dockerfile: Containerfile
+    image: localhost/ein-ems
+    restart: unless-stopped
+    stop_grace_period: 60s
+    env_file: .env
+    environment:
+      EMS_PORT: 8181
+      EMS_KEY: ${EMS_KEY}
+      EMS_ROOTS: /files:ro,/old:ro,/files-volatile:rw,/files-tmp:rw
+    mem_limit: ${EMS_MEMORY:-16g}
+    memswap_limit: ${EMS_MEMORY:-16g}
+    volumes:
+      - ${EIN_DATA}/files:/files:ro,z
+      - ${EIN_DATA}/old:/old:ro,z
+      - ${EIN_DATA}/files-volatile:/files-volatile:z
+      - ${EIN_DATA}/files-tmp:/files-tmp:z
+    healthcheck:
+      test: [CMD, python3, -m, ems.healthcheck]
+      interval: 30s
+      timeout: 15s
+      start_period: 120s

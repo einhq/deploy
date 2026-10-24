@@ -1,0 +1,80 @@
+# EiN on one machine: its database and EiN itself. Plain Compose Spec, so `docker compose` and
+# `podman compose` read it alike. setup.sh fetches the sources under src/, writes .env, and writes
+# compose.override.yaml, which every compose reads beside this file, for the options chosen: the
+# media service (compose.ems.yaml) and the assistant's language model (compose.llm.yaml).
+#
+# EiN is the one published: 8080 the web interface, 2222 SSH and SFTP. The other services answer on
+# the compose network alone.
+#
+# EiN reads .env as its environment, so a CFG_ line added there reaches it at the next `up -d`.
+
+name: ein
+
+services:
+  db:
+    build:
+      context: src/db
+      dockerfile: Containerfile
+    image: localhost/ein-db
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER: ein
+      POSTGRES_DB: ein
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?run setup.sh, which writes .env}
+    # TimescaleDB must be preloaded; pg_stat_statements is, so a profiling session can create it.
+    command: [-c, ssl=off, -c, 'shared_preload_libraries=timescaledb,pg_stat_statements']
+    # Parallel queries exchange rows through shared memory; the 64 MB default fails them under load.
+    shm_size: 1g
+    # A named volume, not a folder under EIN_DATA: the engine gives it to the image's postgres user,
+    # which a bind mount under rootless podman would not be.
+    volumes:
+      - db:/home/postgres/pgdata/data
+    # The image restarts the server once during its first start, so ready is a query that succeeds.
+    healthcheck:
+      test: [CMD, psql, -X, -U, ein, -d, ein, -c, SELECT 1]
+      interval: 5s
+      timeout: 5s
+      retries: 60
+
+  # The modules are the folders in modules/, mounted read-only and set up at every start; setup.sh
+  # --module adds one. The four data folders are mounted at the paths the media service mounts them
+  # at, so a path EiN resolves is the path it opens: /files the originals, /old older originals,
+  # /files-volatile the renditions, /files-tmp scratch space. `z` labels them shared under SELinux
+  # and is ignored elsewhere.
+  ein:
+    # On core's own image, which setup.sh builds first as localhost/ein-core.
+    build:
+      context: .
+      dockerfile: ein.Containerfile
+    image: localhost/ein
+    restart: unless-stopped
+    stop_grace_period: 60s
+    env_file: .env
+    environment:
+      POSTGRES_URL: postgres://ein:${POSTGRES_PASSWORD}@db:5432/ein
+      CFG_HTTP_PORT: 8080
+      CFG_SSH_PORT: 2222
+      CFG_EMS_URL: http://ems:8181
+      CFG_EMS_KEY: ${EMS_KEY:?run setup.sh, which writes .env}
+      CFG_LLM_URL: ${CFG_LLM_URL:-http://llm:8190}
+      DEV_MODULES_PATH: /modules
+      FILE_ROOT_PATH: /files
+      VOLATILE_FILE_ROOT_PATH: /files-volatile
+      FILE_TMP_PATH: /files-tmp
+    mem_limit: ${EIN_MEMORY:-6g}
+    memswap_limit: ${EIN_MEMORY:-6g}
+    ports:
+      - ${EIN_BIND:-0.0.0.0}:${EIN_HTTP_PORT:-8080}:8080
+      - ${EIN_BIND:-0.0.0.0}:${EIN_SSH_PORT:-2222}:2222
+    volumes:
+      - ./modules:/modules:ro,z
+      - ${EIN_DATA:?run setup.sh, which writes .env}/files:/files:z
+      - ${EIN_DATA}/old:/old:z
+      - ${EIN_DATA}/files-volatile:/files-volatile:z
+      - ${EIN_DATA}/files-tmp:/files-tmp:z
+    depends_on:
+      db:
+        condition: service_healthy
+
+volumes:
+  db:

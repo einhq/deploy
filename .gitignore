@@ -1,0 +1,7 @@
+# What setup.sh makes: the sources it builds, the modules it adds, the settings with their
+# passwords, the options chosen, and the data when EIN_DATA is left at its default.
+/src/
+/modules/
+/.env
+/compose.override.yaml
+/data/
