@@ -1,10 +1,10 @@
 # deploy
 
 EiN on one Linux machine with podman or Docker and their compose. The installer on
-[einhq.github.io](https://einhq.github.io) fetches this repository into `~/ein` and runs `setup.sh`:
+[einhq.eu](https://einhq.eu) fetches this repository into `~/ein` and runs `setup.sh`:
 
 ```bash
-curl -fsSL https://einhq.github.io/install.sh | bash
+curl -fsSL https://einhq.eu/install.sh | bash
 ```
 
 What is installed is EiN and its database. The media service, the assistant's language model and
