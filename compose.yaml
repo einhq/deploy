@@ -25,10 +25,10 @@ services:
     command: [-c, ssl=off, -c, 'shared_preload_libraries=timescaledb,pg_stat_statements']
     # Parallel queries exchange rows through shared memory; the 64 MB default fails them under load.
     shm_size: 1g
-    # A named volume, not a folder under EIN_DATA: the engine gives it to the image's postgres user,
-    # which a bind mount under rootless podman would not be.
+    # The volume ein_db in the engine's storage, or the folder EIN_DB_DIR names (setup.sh --db-dir),
+    # which setup.sh gives to the image's postgres user first, as the engine does for a volume.
     volumes:
-      - db:/home/postgres/pgdata/data
+      - ${EIN_DB_DIR:-db}:/home/postgres/pgdata/data
     # The image restarts the server once during its first start, so ready is a query that succeeds.
     healthcheck:
       test: [CMD, psql, -X, -U, ein, -d, ein, -c, SELECT 1]

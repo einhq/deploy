@@ -15,6 +15,7 @@ the modules are added to it with options, at the first install or any time after
 ./setup.sh --llm              # the assistant's language model, Qwen3.5-4B in llama.cpp
 ./setup.sh --module archive   # a module, which EiN installs at its start with the modules it needs (archive needs ems)
 ./setup.sh                    # update: the newest sources of EiN and its services, rebuilt and restarted
+./setup.sh --only ein         # update one service, ein, ems, db or llm, and restart only it
 ```
 
 The installer passes the same options on: `curl … | bash -s -- --ems --module archive`. An option
@@ -35,7 +36,7 @@ data/                 your files and the installed modules, unless EIN_DATA name
 ```
 
 The last four are made here and are not in the repository. Back up `.env` and the data folder; the
-database is the `ein_db` volume of the container engine.
+database is the `ein_db` volume of the container engine, or the folder `--db-dir` named.
 
 ## Running it
 
@@ -58,13 +59,54 @@ A new instance prints its admin password once, and `setup.sh` shows it at the en
 
 ## Modules
 
-EiN installs its modules itself, from their repositories (`einhq/module-<name>` on GitHub), into
+EiN installs its modules itself, from their repositories (`einhq/module-<name>` on GitHub, or the
+source's own, below), into
 `modules/` in the data folder, which is mounted into EiN, so they stay when EiN is updated or its
 container is made again. `EIN_MODULES` in `.env` names the ones it installs at its start when they
 are missing, with the modules they need; `--module` adds one there. Settings → Modules in the web
 interface lists every published module, and installs, updates and removes them; `mod search` and
 `mod install` in EiN's shell do the same. `setup.sh` does not update a module: Settings → Modules
 does.
+
+## Installing from your own Forgejo or Gitea
+
+Everything comes from GitHub's `einhq` unless `--source` names another organisation that has EiN's
+repositories under the same names: `deploy`, `core`, `db`, `ems`, `llm` and the `module-*` ones,
+such as a mirror on a Forgejo or a Gitea of your own, or the one EiN is developed on. Its token, when
+the repositories are private, is `EIN_SOURCE_KEY` in the environment; a token that reads repositories
+and organisations is enough. The installer takes both and fetches deploy from there too:
+
+```bash
+K=…   # the token
+curl -fsSL -H "Authorization: token $K" 'http://forge.example:3000/api/v1/repos/ein/einhq.github.io/raw/install.sh?ref=main' \
+  | EIN_SOURCE_KEY=$K bash -s -- --source http://forge.example:3000/ein --ems --module archive
+```
+
+`.env` keeps them as `EIN_SOURCE` and `EIN_SOURCE_KEY`, so every update fetches from the same
+place; `--source` again moves an installation to another. git gets the token as a header for each
+call, so it is in no `.git/config`. From a Forgejo or a Gitea, EiN installs its modules from there
+too: setup.sh writes `CFG_MODULE_SOURCES` and `CFG_MODULE_SOURCES_KEY` into `.env` for it, and
+Settings → Modules lists that organisation's modules.
+
+## The database
+
+The database is the `ein_db` volume, in the container engine's storage, unless `--db-dir` names a
+folder for it at the install (`EIN_DB_DIR` in `.env`). On a machine whose large disk is a spinning
+one, put it on the SSD: searching the archive reads its vector indexes at random, a few milliseconds
+a page on an SSD and tens of milliseconds on a spinning disk under load.
+
+```bash
+./setup.sh --db-dir /srv/ssd/ein-db
+```
+
+setup.sh gives the folder to the database image's postgres user before the database starts, so under
+rootless podman it belongs to one of your subordinate ids: look into it with `podman unshare ls`. It
+takes an empty folder, or one a database is in. A database already in the volume is not left
+behind: setup.sh says how to copy it over first. A backup is the same either way:
+
+```bash
+podman compose exec db pg_dump -U ein -Fc ein >ein.dump
+```
 
 ## Settings
 
