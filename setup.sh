@@ -437,11 +437,15 @@ wait_for_ein() {
       [ -z "$password" ] || echo "Sign in as admin with the password $password, and change it: it is shown this once."
       return
     fi
-    # A container that stopped does not come up by waiting longer.
-    id=$("$engine" ps -q --filter label=com.docker.compose.project=ein --filter label=com.docker.compose.service=ein | head -1)
-    if [ -z "$id" ]; then down=$((down + 1)); else down=0; fi
-    if [ "$down" -ge 3 ]; then
-      id=$("$engine" ps -aq --filter label=com.docker.compose.project=ein --filter label=com.docker.compose.service=ein | head -1)
+    # A container that stopped, or that its engine restarts again and again, does not come up by
+    # waiting longer.
+    id=$("$engine" ps -aq --filter label=com.docker.compose.project=ein --filter label=com.docker.compose.service=ein | head -1)
+    if [ -z "$id" ] || [ "$("$engine" inspect --format '{{.State.Running}}' "$id")" != true ]; then
+      down=$((down + 1))
+    else
+      down=0
+    fi
+    if [ "$down" -ge 3 ] || { [ -n "$id" ] && [ "$("$engine" inspect --format '{{.RestartCount}}' "$id")" -ge 3 ]; }; then
       [ -z "$id" ] || "$engine" logs --tail 30 "$id" >&2 || true
       fail "EiN stopped before it answered; its log is above: $engine compose logs ein"
     fi
