@@ -155,9 +155,16 @@ pick_engine() {
   fi
   "$engine" compose version >/dev/null 2>&1 ||
     fail "'$engine compose' does not run: install podman-compose (or docker-compose) for podman, or the compose plugin for Docker"
+  # docker-compose under podman, when it is installed and podman-compose is not: it reaches podman
+  # through podman's socket, and builds through it too rather than with a docker command.
+  if [ "$engine" = podman ] && ! podman compose version 2>&1 | grep -q podman-compose; then
+    export COMPOSE_DOCKER_CLI_BUILD=0
+    curl -sf -o /dev/null --unix-socket "$(podman info --format '{{.Host.RemoteSocket.Path}}')" http://d/_ping ||
+      fail "'podman compose' runs docker-compose here, which needs podman's socket: systemctl --user enable --now podman.socket, then ./setup.sh again"
+  fi
 }
 
-compose() { "$engine" compose "$@"; }
+compose() { "$engine" compose -p ein "$@"; }
 
 # The settings, with passwords made here: nothing else keeps them, so this file is the one to back up.
 write_env() {
@@ -170,6 +177,9 @@ write_env() {
 # and nowhere else. compose reads it, and EiN and the media service get it as their environment, so
 # a CFG_ line for EiN or an EMS_ line for the media service goes here too. Apply a change with
 # ./setup.sh, or \`$engine compose up -d\` when no option changed.
+
+# The compose project's name, which names its containers, network and volumes.
+COMPOSE_PROJECT_NAME=ein
 
 # The options: the media service, the assistant's language model, and the graphics card for both.
 # setup.sh --ems / --llm sets the first two; it found a card with its CDI spec, or did not.
@@ -309,7 +319,8 @@ write_override() {
   {
     echo "# Written by setup.sh from the options in .env; edit those and run setup.sh again."
     echo "services:"
-    [ "$EIN_EMS" = 1 ] || [ "$EIN_LLM" = 1 ] || echo "  {}"
+    # Never an empty services: docker-compose 1.x takes such a file for its old version 1 format.
+    [ "$EIN_EMS" = 1 ] || [ "$EIN_LLM" = 1 ] || echo "  ein: {}"
     local service option
     for service in ems llm; do
       option=EIN_${service^^}

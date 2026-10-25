@@ -7,8 +7,9 @@
 # the compose network alone.
 #
 # EiN reads .env as its environment, so a CFG_ line added there reaches it at the next `up -d`.
-
-name: ein
+#
+# The project's name, ein, is COMPOSE_PROJECT_NAME in .env: docker-compose 1.x rejects a top-level
+# name in this file.
 
 services:
   db:
