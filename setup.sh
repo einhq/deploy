@@ -158,7 +158,7 @@ pick_engine() {
     fail "'$engine compose' does not run: install podman-compose (or docker-compose) for podman, or the compose plugin for Docker"
   # docker-compose under podman, when it is installed and podman-compose is not: it reaches podman
   # through podman's socket, and builds through it too rather than with a docker command.
-  if [ "$engine" = podman ] && ! podman compose version 2>&1 | grep -q podman-compose; then
+  if [ "$engine" = podman ] && [[ $(podman compose version 2>&1) != *podman-compose* ]]; then
     export COMPOSE_DOCKER_CLI_BUILD=0
     curl -sf -o /dev/null --unix-socket "$(podman info --format '{{.Host.RemoteSocket.Path}}')" http://d/_ping ||
       fail "'podman compose' runs docker-compose here, which needs podman's socket: systemctl --user enable --now podman.socket, then ./setup.sh again"
@@ -170,6 +170,10 @@ compose() { "$engine" compose -p ein "$@"; }
 # The settings, with passwords made here: nothing else keeps them, so this file is the one to back up.
 write_env() {
   local data=${EIN_DATA:-$here/data} gpu=0
+  # A database from an earlier install has the password of that install's .env, which a new one
+  # does not know: EiN would not get in.
+  ! "$engine" volume inspect ein_db >/dev/null 2>&1 ||
+    fail "the database of an earlier install is here, the volume ein_db, and its password was in the .env that is gone. Put that .env back, or remove the database for a new one: $engine volume rm ein_db"
   mkdir -p "$data"
   data=$(cd "$data" && pwd)
   if nvidia-smi >/dev/null 2>&1 && { [ -s /var/run/cdi/nvidia.yaml ] || compgen -G '/etc/cdi/nvidia*.yaml' >/dev/null; }; then gpu=1; fi
@@ -423,14 +427,29 @@ build() {
 # EiN answers once its database is up and its boot is through. A new instance prints its admin
 # password to the log, once.
 wait_for_ein() {
-  local url="http://127.0.0.1:$EIN_HTTP_PORT/" password
-  for _ in $(seq 300); do
+  local url="http://127.0.0.1:$EIN_HTTP_PORT/" password id line last= down=0
+  echo "Waiting for EiN to answer at $url; its first start takes a minute or more"
+  for i in $(seq 300); do
     if curl -fs -o /dev/null --max-time 5 "$url"; then
       echo
       echo "EiN is up at http://$(hostname):$EIN_HTTP_PORT/"
       password=$(compose logs ein 2>/dev/null | sed -n 's/.*Admin password set to: //p' | tail -1)
       [ -z "$password" ] || echo "Sign in as admin with the password $password, and change it: it is shown this once."
       return
+    fi
+    # A container that stopped does not come up by waiting longer.
+    id=$("$engine" ps -q --filter label=com.docker.compose.project=ein --filter label=com.docker.compose.service=ein | head -1)
+    if [ -z "$id" ]; then down=$((down + 1)); else down=0; fi
+    if [ "$down" -ge 3 ]; then
+      id=$("$engine" ps -aq --filter label=com.docker.compose.project=ein --filter label=com.docker.compose.service=ein | head -1)
+      [ -z "$id" ] || "$engine" logs --tail 30 "$id" >&2 || true
+      fail "EiN stopped before it answered; its log is above: $engine compose logs ein"
+    fi
+    # Every 10 seconds, what EiN last logged, when it is new.
+    if [ -n "$id" ] && [ $((i % 5)) = 0 ]; then
+      line=$("$engine" logs --tail 1 "$id" 2>&1 | tail -1 | cut -c1-150)
+      [ -z "$line" ] || [ "$line" = "$last" ] || echo "  $line"
+      last=$line
     fi
     sleep 2
   done
