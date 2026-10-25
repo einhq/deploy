@@ -50,7 +50,8 @@ podman compose logs -f ein
 podman compose down             # stop; `up -d` starts again
 ```
 
-Port 8080 is the web interface and 2222 SSH and SFTP, on every address of the machine. Set
+Port 8080 is the web interface and 2222 SSH and SFTP, on every address of the machine; when
+something else on the machine has one, `setup.sh` takes the next free port and says so. Set
 `EIN_BIND=127.0.0.1` in `.env` to keep them to the machine behind an HTTPS proxy of your own. The
 database, the media service and the model are reached only by EiN, on the compose network.
 

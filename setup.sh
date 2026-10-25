@@ -22,8 +22,8 @@
 #
 # Read the first time only, when .env is written:
 #   EIN_DATA       the folder for your originals, the renditions, scratch space and the model (default: ./data)
-#   EIN_HTTP_PORT  the web interface's port (default: 8080)
-#   EIN_SSH_PORT   SSH and SFTP's port (default: 2222)
+#   EIN_HTTP_PORT  the web interface's port (default: 8080, or the next free one)
+#   EIN_SSH_PORT   SSH and SFTP's port (default: 2222, or the next free one)
 set -euo pipefail
 
 here=$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)
@@ -100,6 +100,7 @@ main() {
   step "Starting EiN"
   mkdir -p "$EIN_DATA"/{files,old,files-volatile,files-tmp,llm,modules}
   prepare_db_dir
+  free_ports
   # On an update, --force-recreate: older podman-compose starts the new images only when the config
   # changed. --remove-orphans: an option left out stops its service.
   local recreate=()
@@ -310,6 +311,29 @@ check_db_mount() {
   [ -n "$source" ] || fail "the database's folder is not mounted into its container: $engine inspect $id"
   if [ -n "$want" ] && [ "$(realpath "$source")" != "$(realpath "$want")" ]; then
     fail "the database runs on $source, not on $want: $engine compose down, then ./setup.sh again"
+  fi
+}
+
+# EiN's ports, each moved to the next free one when something else on this machine listens on it,
+# such as another web server on 8080. Not while EiN runs: then it is EiN that holds them.
+free_ports() {
+  [ -z "$("$engine" ps -q --filter label=com.docker.compose.project=ein --filter label=com.docker.compose.service=ein)" ] || return 0
+  local name port
+  for name in EIN_HTTP_PORT EIN_SSH_PORT; do
+    port=${!name}
+    while port_taken "$port"; do port=$((port + 1)); done
+    [ "$port" != "${!name}" ] || continue
+    echo "Port ${!name} is taken on this machine: EiN uses $port instead ($name in .env)"
+    set_env "$name" "$port"
+    printf -v "$name" %s "$port"
+  done
+}
+
+port_taken() {
+  if command -v ss >/dev/null; then
+    [ -n "$(ss -ltnH "sport = :$1")" ]
+  else
+    (exec 3<>"/dev/tcp/127.0.0.1/$1") 2>/dev/null
   fi
 }
 
