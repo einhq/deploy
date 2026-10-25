@@ -101,6 +101,11 @@ main() {
   mkdir -p "$EIN_DATA"/{files,old,files-volatile,files-tmp,llm,modules}
   prepare_db_dir
   free_ports
+  # A network podman made before it could give names keeps without them: down takes it away with
+  # the containers, and up makes it again.
+  if [ "$engine" = podman ] && [ "$(podman network inspect --format '{{.DNSEnabled}}' ein_default 2>/dev/null)" = false ]; then
+    compose down
+  fi
   # On an update, --force-recreate: older podman-compose starts the new images only when the config
   # changed. --remove-orphans: an option left out stops its service.
   local recreate=()
@@ -163,6 +168,19 @@ pick_engine() {
     curl -sf -o /dev/null --unix-socket "$(podman info --format '{{.Host.RemoteSocket.Path}}')" http://d/_ping ||
       fail "'podman compose' runs docker-compose here, which needs podman's socket: systemctl --user enable --now podman.socket, then ./setup.sh again"
   fi
+  # Under podman's older network backend, CNI, containers find each other by name only with its
+  # dnsname plugin, and EiN finds its database by the name db.
+  if [ "$engine" = podman ] && [ "$(podman info --format '{{.Host.NetworkBackend}}')" = cni ] && ! has_dnsname; then
+    fail "podman's networks here give no names, which EiN needs to find its database: install podman's CNI plugin dnsname (Debian and Ubuntu: golang-github-containernetworking-plugin-dnsname; Fedora: podman-plugins), then ./setup.sh again"
+  fi
+}
+
+has_dnsname() {
+  local dir
+  for dir in /usr/local/libexec/cni /usr/libexec/cni /usr/local/lib/cni /usr/lib/cni /opt/cni/bin; do
+    [ ! -x "$dir/dnsname" ] || return 0
+  done
+  return 1
 }
 
 compose() { "$engine" compose -p ein "$@"; }
