@@ -107,10 +107,17 @@ main() {
     compose down
   fi
   # On an update, --force-recreate: older podman-compose starts the new images only when the config
-  # changed. --remove-orphans: an option left out stops its service.
-  local recreate=()
-  [ -z "$("$engine" ps -aq --filter label=com.docker.compose.project=ein)" ] || recreate=(--force-recreate)
-  compose up -d "${recreate[@]}" --remove-orphans
+  # changed. --remove-orphans: an option left out stops its service. podman-compose's
+  # --force-recreate takes every service down first anyway, so there they are taken down and started
+  # one by one (start).
+  if [ "$compose_tool" = podman-compose ]; then
+    compose down --remove-orphans
+    start db ein ems llm
+  else
+    local recreate=()
+    [ -z "$("$engine" ps -aq --filter label=com.docker.compose.project=ein)" ] || recreate=(--force-recreate)
+    compose up -d "${recreate[@]}" --remove-orphans
+  fi
   check_db_mount
   wait_for_ein
   after_reboot
@@ -150,7 +157,29 @@ recreate() {
     ids=$("$engine" ps -aq --filter label=com.docker.compose.project=ein --filter "label=com.docker.compose.service=$service")
     [ -z "$ids" ] || { "$engine" stop -t 60 $ids >/dev/null && "$engine" rm $ids >/dev/null; }
   done
-  compose up -d --no-deps "$@"
+  if [ "$compose_tool" = podman-compose ]; then start "$@"; else compose up -d --no-deps "$@"; fi
+}
+
+# The services named, of those installed, started one by one in the order a service needs the one
+# before it, under podman-compose. It never reads memswap_limit, and podman then lets a container
+# swap as much again as its memory limit: EMS's idle search models went to swap, and a search waited
+# for them. Each service is started on its own, its swap limit the memory limit podman-compose gives
+# it (from a dry run), as every compose file here has it. Kept in the container's config, it holds
+# through a restart; a plain `podman compose up -d` that creates a container leaves it out.
+start() {
+  local service mem
+  for service in db ein ems llm; do
+    [[ " $* " == *" $service "* ]] || continue
+    case $service in ems | llm) local option=EIN_${service^^}; [ "${!option}" = 1 ] || continue ;; esac
+    # The dry run writes its commands to stderr, the services this one needs too: 1.0 ignores --no-deps.
+    mem=$(compose --dry-run up -d --no-deps "$service" 2>&1 |
+      sed -n "/^podman run .* --label com.docker.compose.service=$service /s/.* -m \([^ ]*\) .*/\1/p" | tail -1)
+    if [ -n "$mem" ]; then
+      compose --podman-run-args="--memory-swap=$mem" up -d --no-deps "$service"
+    else
+      compose up -d --no-deps "$service"
+    fi
+  done
 }
 
 pick_engine() {
@@ -164,7 +193,9 @@ pick_engine() {
     fail "'$engine compose' does not run: install podman-compose (or docker-compose) for podman, or the compose plugin for Docker"
   # docker-compose under podman, when it is installed and podman-compose is not: it reaches podman
   # through podman's socket, and builds through it too rather than with a docker command.
-  if [ "$engine" = podman ] && [[ $(podman compose version 2>&1) != *podman-compose* ]]; then
+  compose_tool=
+  if [ "$engine" = podman ] && [[ $(podman compose version 2>&1) == *podman-compose* ]]; then compose_tool=podman-compose; fi
+  if [ "$engine" = podman ] && [ "$compose_tool" != podman-compose ]; then
     export COMPOSE_DOCKER_CLI_BUILD=0
     curl -sf -o /dev/null --unix-socket "$(podman info --format '{{.Host.RemoteSocket.Path}}')" http://d/_ping ||
       fail "'podman compose' runs docker-compose here, which needs podman's socket: systemctl --user enable --now podman.socket, then ./setup.sh again"
