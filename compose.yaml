@@ -1,7 +1,8 @@
 # EiN on one machine: its database and EiN itself. Plain Compose Spec, so `docker compose` and
 # `podman compose` read it alike. setup.sh fetches the sources under src/, writes .env, and writes
 # compose.override.yaml, which every compose reads beside this file, for the options chosen: the
-# media service (compose.ems.yaml) and the assistant's language model (compose.llm.yaml).
+# media service (compose.ems.yaml) and the assistant's language model (compose.llm.yaml). Under
+# podman it gives every service restart: always, the policy podman starts again at boot.
 #
 # EiN is the one published: 8080 the web interface, 2222 SSH and SFTP. The other services answer on
 # the compose network alone.

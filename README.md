@@ -31,7 +31,7 @@ setup.sh              fetches the sources, writes .env and compose.override.yaml
 
 src/                  the sources setup.sh builds: core, db, and ems and llm with their options
 .env                  the settings, with the passwords made at the install
-compose.override.yaml the options in .env as services, written by setup.sh
+compose.override.yaml the options in .env as services, and podman's restart policy, written by setup.sh
 data/                 your files and the installed modules, unless EIN_DATA named another folder at the install
 ```
 
@@ -57,6 +57,15 @@ database, the media service and the model are reached only by EiN, on the compos
 
 A new instance prints its admin password once, and `setup.sh` shows it at the end; sign in as
 `admin` and change it.
+
+EiN starts again when the machine does, and `setup.sh` ends by saying whether it will. Docker's
+daemon starts it when Docker is enabled at boot. Under podman, `podman-restart.service` starts it,
+and only containers whose policy is `restart: always`, which `compose.override.yaml` gives every
+service there. `setup.sh` enables that unit; under rootless podman it is a user unit, which runs at
+boot only for a user who lingers, and `setup.sh` enables lingering too when the system lets it, or
+names the command that does (`sudo loginctl enable-linger $USER`). A container stopped with
+`podman compose stop` starts again at the next boot; `podman compose down` removes it, and it stays
+down.
 
 ## Modules
 

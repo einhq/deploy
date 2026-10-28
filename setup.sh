@@ -113,6 +113,7 @@ main() {
   compose up -d "${recreate[@]}" --remove-orphans
   check_db_mount
   wait_for_ein
+  after_reboot
 }
 
 # One service fetched, built and restarted, the others left running: an update of EiN alone does not
@@ -359,27 +360,38 @@ port_taken() {
   fi
 }
 
-# What the options add to compose.yaml. Every compose reads compose.override.yaml beside it, so a
-# plain `compose up -d` starts the same services as this script does.
+# What the options and the engine add to compose.yaml. Every compose reads compose.override.yaml
+# beside it, so a plain `compose up -d` starts the same services as this script does.
+#
+# Under podman every service restarts always: at boot podman-restart.service starts only the
+# containers with that policy, and leaves unless-stopped ones down. Docker's daemon starts those too.
 write_override() {
+  local service option lines written=0
   {
-    echo "# Written by setup.sh from the options in .env; edit those and run setup.sh again."
+    echo "# Written by setup.sh from the options in .env and the container engine; edit those and run"
+    echo "# setup.sh again."
     echo "services:"
-    # Never an empty services: docker-compose 1.x takes such a file for its old version 1 format.
-    [ "$EIN_EMS" = 1 ] || [ "$EIN_LLM" = 1 ] || echo "  ein: {}"
-    local service option
-    for service in ems llm; do
-      option=EIN_${service^^}
-      [ "${!option}" = 1 ] || continue
+    for service in db ein ems llm; do
+      lines=()
+      case $service in
+        ems | llm)
+          option=EIN_${service^^}
+          [ "${!option}" = 1 ] || continue
+          lines+=("extends: { file: compose.$service.yaml, service: $service }")
+          [ "$EIN_GPU" != 1 ] || lines+=("devices: [nvidia.com/gpu=all]")
+          ;;
+        ein)
+          [ "$EIN_LLM" != 1 ] || lines+=("environment:" "  CFG_LLM_CARD: $([ "$EIN_GPU" = 1 ] && echo card || echo cpu)")
+          ;;
+      esac
+      [ "$engine" != podman ] || lines+=("restart: always")
+      [ ${#lines[@]} != 0 ] || continue
       echo "  $service:"
-      echo "    extends: { file: compose.$service.yaml, service: $service }"
-      [ "$EIN_GPU" != 1 ] || echo "    devices: [nvidia.com/gpu=all]"
+      printf '    %s\n' "${lines[@]}"
+      written=1
     done
-    if [ "$EIN_LLM" = 1 ]; then
-      echo "  ein:"
-      echo "    environment:"
-      echo "      CFG_LLM_CARD: $([ "$EIN_GPU" = 1 ] && echo card || echo cpu)"
-    fi
+    # Never an empty services: docker-compose 1.x takes such a file for its old version 1 format.
+    [ "$written" = 1 ] || echo "  ein: {}"
   } >compose.override.yaml
 }
 
@@ -476,6 +488,41 @@ wait_for_ein() {
     sleep 2
   done
   fail "EiN did not answer at $url in 10 minutes: $engine compose logs ein"
+}
+
+# Whether EiN starts again when the machine does, made so where this user may, and what it takes
+# where not. Docker's daemon starts EiN when it starts itself. Under podman, podman-restart.service
+# does; rootless, it is a user unit, which runs at boot only for a user who lingers.
+after_reboot() {
+  local todo=() scope=(--user) user
+  user=$(id -un)
+  if [ "$engine" = docker ]; then
+    systemctl is-enabled --quiet docker.service 2>/dev/null || systemctl --user is-enabled --quiet docker.service 2>/dev/null ||
+      todo+=("sudo systemctl enable docker")
+  else
+    [ "$(id -u)" != 0 ] || scope=()
+    if ! systemctl "${scope[@]}" is-enabled --quiet podman-restart.service 2>/dev/null; then
+      if systemctl "${scope[@]}" enable podman-restart.service >/dev/null 2>&1; then
+        echo "Enabled podman-restart.service, which starts EiN's containers at boot"
+      else
+        todo+=("systemctl ${scope[*]} enable podman-restart.service")
+      fi
+    fi
+    if [ "$(id -u)" != 0 ] && [ "$(loginctl show-user "$user" -p Linger --value 2>/dev/null)" != yes ]; then
+      if loginctl --no-ask-password enable-linger 2>/dev/null; then
+        echo "Enabled lingering for $user, so podman-restart.service runs at boot without a login"
+      else
+        todo+=("sudo loginctl enable-linger $user")
+      fi
+    fi
+  fi
+  if [ ${#todo[@]} = 0 ]; then
+    echo "EiN starts again when the machine does."
+  else
+    echo "EiN does not start again when the machine does until this has run:"
+    printf '  %s\n' "${todo[@]}"
+    echo "Until then, start it after a reboot with: cd $here && $engine compose up -d"
+  fi
 }
 
 step() { printf '\n== %s\n' "$1"; }
