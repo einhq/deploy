@@ -1,6 +1,7 @@
 #!/usr/bin/env bash
-# Installs EiN on this machine, and updates it when run again: fetches the sources under src/,
-# writes .env the first time, builds the images and starts them with compose.
+# Installs EiN on this machine, and updates it when run again: brings this folder up to date from
+# the source's deploy, fetches the sources under src/, writes .env the first time, builds the images
+# and starts them with compose.
 #
 #   ./setup.sh                    EiN and its database; run again, the newest sources of what is here
 #   ./setup.sh --ems              also the media service: every media tool and model, about 30 GB
@@ -33,7 +34,7 @@ here=$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)
 cd "$here"
 
 main() {
-  local want_ems= want_llm= modules=() source= db_dir= only= key=${EIN_SOURCE_KEY:-} options=0
+  local args=("$@") want_ems= want_llm= modules=() source= db_dir= only= key=${EIN_SOURCE_KEY:-} options=0
   while [ $# -gt 0 ]; do
     case $1 in
       --ems) want_ems=1 ;;
@@ -47,7 +48,9 @@ main() {
         ;;
       --source)
         [ $# -ge 2 ] || fail "--source needs an organisation's address, such as https://github.com/einhq"
-        source=$2
+        source=${2%/}
+        [[ $source =~ ^https?://[A-Za-z0-9.-]+(:[0-9]+)?/[A-Za-z0-9._-]+$ ]] ||
+          fail "--source takes an organisation's address, such as https://github.com/einhq or http://forge.example:3000/ein: $2"
         shift
         ;;
       --db-dir)
@@ -71,6 +74,7 @@ main() {
     shift
   done
 
+  update_self "$source" "${args[@]}"
   pick_engine
   if [ -n "$only" ]; then
     [ "$options" = 0 ] || fail "--only updates what is installed: give the other options without it"
@@ -328,12 +332,32 @@ load_env() {
   set -a && . ./.env && set +a
 }
 
+# This folder, a clone of the source's deploy, moved to its newest commit before anything else, and
+# this script run again with the same options when that changed it: an update takes the compose
+# files, ein.Containerfile and setup.sh as they are now, not as they were installed. The source is
+# --source when given, else the one in .env; the token is EIN_SOURCE_KEY from the environment, else
+# from .env. A folder that is not a git clone is left as it is.
+update_self() {
+  local source=$1 before after
+  shift
+  [ -e .git ] || return 0
+  [ -n "$source" ] || [ ! -f .env ] || source=$(sed -n 's/^EIN_SOURCE=//p' .env)
+  local EIN_SOURCE_KEY=${EIN_SOURCE_KEY:-}
+  [ -n "$EIN_SOURCE_KEY" ] || [ ! -f .env ] || EIN_SOURCE_KEY=$(sed -n 's/^EIN_SOURCE_KEY=//p' .env)
+  [ -z "$source" ] || git remote set-url origin "$source/deploy.git"
+  before=$(git rev-parse HEAD)
+  git_source pull --ff-only --quiet ||
+    fail "$here could not be brought up to date from $(git remote get-url origin): git status there says why"
+  after=$(git rev-parse HEAD)
+  [ "$after" != "$before" ] || return 0
+  echo "Updated $here to $(git log -1 --format='%h %cs'); running its setup.sh"
+  exec "$here/setup.sh" "$@"
+}
+
 # An organisation's address, https://host/owner, as the source of the sources and the modules. Back
 # on GitHub, the module settings a Forgejo or a Gitea source wrote go again, and EiN's default holds.
 set_source() {
-  local url=${1%/}
-  [[ $url =~ ^https?://[A-Za-z0-9.-]+(:[0-9]+)?/[A-Za-z0-9._-]+$ ]] ||
-    fail "--source takes an organisation's address, such as https://github.com/einhq or http://forge.example:3000/ein: $1"
+  local url=$1
   if is_github "$url" && ! is_github "$(sed -n 's/^EIN_SOURCE=//p' .env)"; then
     unset_env CFG_MODULE_SOURCES
     unset_env CFG_MODULE_SOURCES_KEY

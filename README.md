@@ -14,7 +14,7 @@ the modules are added to it with options, at the first install or any time after
 ./setup.sh --ems              # the media service: every media tool and model, an image of about 30 GB
 ./setup.sh --llm              # the assistant's language model, Qwen3.5-4B in llama.cpp
 ./setup.sh --module archive   # a module, which EiN installs at its start with the modules it needs (archive needs ems)
-./setup.sh                    # update: the newest sources of EiN and its services, rebuilt and restarted
+./setup.sh                    # update: this folder and the newest sources of EiN and its services, rebuilt and restarted
 ./setup.sh --only ein         # update one service, ein, ems, db or llm, and restart only it
 ```
 
@@ -27,7 +27,7 @@ compose.yaml          EiN and PostgreSQL: the base every install runs
 compose.ems.yaml      the media service, which --ems adds
 compose.llm.yaml      the language model, which --llm adds
 ein.Containerfile     core's own image with the web interface built in
-setup.sh              fetches the sources, writes .env and compose.override.yaml, builds, starts
+setup.sh              updates this folder, fetches the sources, writes .env and compose.override.yaml, builds, starts
 
 src/                  the sources setup.sh builds: core, db, and ems and llm with their options
 .env                  the settings, with the passwords made at the install
@@ -35,8 +35,13 @@ compose.override.yaml the options in .env as services, and podman's restart poli
 data/                 your files and the installed modules, unless EIN_DATA named another folder at the install
 ```
 
-The last four are made here and are not in the repository. Back up `.env` and the data folder; the
-database is the `ein_db` volume of the container engine, or the folder `--db-dir` named.
+The last four are made here and are not in the repository. Every run of `setup.sh` first brings this
+folder up to date from the source's `deploy` (a fast-forward `git pull`), and runs the new `setup.sh`
+when that changed it, so an update takes the compose files and the script as they are now. A local
+commit or change here that the pull cannot pass stops it, and `git status` says why.
+
+Back up `.env` and the data folder; the database is the `ein_db` volume of the container engine, or
+the folder `--db-dir` named.
 
 ## Running it
 
