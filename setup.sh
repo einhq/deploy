@@ -85,9 +85,17 @@ main() {
     [ "$options" = 0 ] || fail "--only updates what is installed: give the other options without it"
     [ -f .env ] || fail "--only updates an installation: run ./setup.sh first"
     load_env
+    # podman-compose 1.0 hashes the whole project's config: after a change to the override, starting
+    # one service makes every container again, with that one's swap limit, which the database's
+    # start refuses. Then every service starts again, each on its own (start).
+    local override
+    override=$(cat compose.override.yaml 2>/dev/null || true)
     write_override
-    update_one "$only"
-    return
+    if [ "$compose_tool" != podman-compose ] || [ "$(cat compose.override.yaml)" = "$override" ]; then
+      update_one "$only"
+      return
+    fi
+    echo "compose.override.yaml changed, so every service is updated and started again, not $only alone"
   fi
 
   [ -f .env ] || write_env
