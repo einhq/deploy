@@ -17,7 +17,8 @@
 # or `docker compose`, which work from this folder afterwards as usual (ps, logs, down, up -d). The
 # engine is kept in .env too: a later run uses it, whichever else is installed. Under podman-compose,
 # a container that `podman compose up -d` makes again, after a change to .env, has no swap limit:
-# this script gives each one (see start), and a run of it gives it back.
+# this script gives each one (see start), and a run of it gives it back. An update that came up
+# removes the images its build replaced, and says how much that freed.
 #
 # --source names an organisation on GitHub, Forgejo or Gitea that has EiN's repositories under their
 # own names (default: https://github.com/einhq), such as http://forge.example:3000/ein. When it is a
@@ -102,6 +103,8 @@ main() {
   [ "$EIN_LLM" != 1 ] || fetch llm src/llm
 
   step "Building the images$([ "$EIN_EMS" != 1 ] || echo ' (the media service the first time: about 30 GB)')"
+  local old
+  old=$(built_images)
   build
 
   step "Starting EiN"
@@ -127,6 +130,7 @@ main() {
   fi
   check_db_mount
   wait_for_ein
+  remove_replaced $old
   after_reboot
   modules_need
 }
@@ -145,6 +149,8 @@ update_one() {
     *) fail "--only takes ein, ems, db or llm, not $1" ;;
   esac
   step "Building $1"
+  local old
+  old=$(built_images)
   build "$1"
   [ "$1" != db ] || prepare_db_dir
   # EiN goes and comes back with the database: podman keeps a container that another requires.
@@ -153,6 +159,7 @@ update_one() {
     db) check_db_mount && wait_for_ein ;;
     ein) wait_for_ein ;;
   esac
+  remove_replaced $old
 }
 
 # The services' containers replaced by new ones from their images, and nothing else touched. Not
@@ -543,6 +550,38 @@ build() {
     *) compose build "$one" ;;
   esac
 }
+
+# The ids of the images build tags, localhost/ein before the localhost/ein-core it is built on.
+built_images() {
+  local name
+  for name in localhost/ein localhost/ein-core localhost/ein-ems localhost/ein-db; do
+    "$engine" image inspect --format '{{.Id}}' "$name" 2>/dev/null || true
+  done
+}
+
+# The images named that lost their name to a new build, removed, and the space that freed said: each
+# update would otherwise leave its old images behind, the media service's about 30 GB. One still
+# named, or that a container uses, is kept; removing localhost/ein takes its old localhost/ein-core.
+remove_replaced() {
+  local id store before after removed=0
+  store=$(if [ "$engine" = podman ]; then podman info --format '{{.Store.GraphRoot}}'; else docker info --format '{{.DockerRootDir}}'; fi) || true
+  before=$(free_bytes "$store")
+  for id in "$@"; do
+    [ "$("$engine" image inspect --format '{{len .RepoTags}}' "$id" 2>/dev/null)" = 0 ] || continue
+    if "$engine" rmi "$id" >/dev/null 2>&1; then removed=$((removed + 1)); fi
+  done
+  [ "$removed" -gt 0 ] || return 0
+  after=$(free_bytes "$store")
+  if [ -n "$before" ] && [ -n "$after" ] && [ "$after" -gt "$before" ]; then
+    echo "Removed the images this update replaced, which freed $(numfmt --to=iec --suffix=B $((after - before)))"
+  else
+    echo "Removed the images this update replaced"
+  fi
+}
+
+# The bytes free on the file system of a folder, or nothing where df cannot see it (Docker Desktop's
+# storage is inside its virtual machine).
+free_bytes() { df -B1 --output=avail "$1" 2>/dev/null | tail -1 || true; }
 
 # EiN answers once its database is up and its boot is through. A new instance prints its admin
 # password to the log, once.
