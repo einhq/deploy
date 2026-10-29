@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # Installs EiN on this machine, and updates it when run again: brings this folder up to date from
-# the source's deploy, fetches the sources under src/, writes .env the first time, builds the images
-# and starts them with compose.
+# the source's deploy, fetches the sources under src/, writes .env the first time, pulls EiN's image
+# and builds the others, and starts them with compose.
 #
 #   ./setup.sh                    EiN and its database; run again, the newest sources of what is here
 #   ./setup.sh --ems              also the media service: every media tool and model, about 30 GB
@@ -18,11 +18,12 @@
 # engine is kept in .env too: a later run uses it, whichever else is installed. Under podman-compose,
 # a container that `podman compose up -d` makes again, after a change to .env, has no swap limit:
 # this script gives each one (see start), and a run of it gives it back. An update that came up
-# removes the images its build replaced, and says how much that freed.
+# removes the images it replaced, and says how much that freed.
 #
 # --source names an organisation on GitHub, Forgejo or Gitea that has EiN's repositories under their
 # own names (default: https://github.com/einhq), such as http://forge.example:3000/ein. When it is a
-# Forgejo or a Gitea, EiN installs its modules from there too. EIN_SOURCE_KEY in the environment is
+# Forgejo or a Gitea, EiN's image is built here from its core rather than pulled from GitHub's
+# registry, and EiN installs its modules from there too. EIN_SOURCE_KEY in the environment is
 # the token that reads it, when its repositories are private; it is kept in .env with the source.
 #
 # Read the first time only, when .env is written:
@@ -33,6 +34,9 @@ set -euo pipefail
 
 here=$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)
 cd "$here"
+
+# EiN's image as compose.yaml names it, which GitHub publishes from core.
+ein_image=ghcr.io/einhq/core:main
 
 main() {
   local args=("$@") want_ems= want_llm= modules=() source= db_dir= only= key=${EIN_SOURCE_KEY:-} options=0
@@ -81,6 +85,7 @@ main() {
     [ "$options" = 0 ] || fail "--only updates what is installed: give the other options without it"
     [ -f .env ] || fail "--only updates an installation: run ./setup.sh first"
     load_env
+    write_override
     update_one "$only"
     return
   fi
@@ -97,12 +102,12 @@ main() {
   write_override
 
   step "Fetching the sources"
-  fetch core src/core
+  ! ein_built || fetch core src/core
   fetch db src/db
   [ "$EIN_EMS" != 1 ] || fetch ems src/ems
   [ "$EIN_LLM" != 1 ] || fetch llm src/llm
 
-  step "Building the images$([ "$EIN_EMS" != 1 ] || echo ' (the media service the first time: about 30 GB)')"
+  step "Getting the images$([ "$EIN_EMS" != 1 ] || echo ' (the media service the first time: about 30 GB)')"
   local old
   old=$(built_images)
   build
@@ -139,7 +144,7 @@ main() {
 # restart the media service, the model or the database.
 update_one() {
   case $1 in
-    ein) fetch core src/core ;;
+    ein) ! ein_built || fetch core src/core ;;
     db) fetch db src/db ;;
     ems | llm)
       local option=EIN_${1^^}
@@ -148,7 +153,7 @@ update_one() {
       ;;
     *) fail "--only takes ein, ems, db or llm, not $1" ;;
   esac
-  step "Building $1"
+  step "Getting $1's image"
   local old
   old=$(built_images)
   build "$1"
@@ -346,7 +351,7 @@ load_env() {
 
 # This folder, a clone of the source's deploy, moved to its newest commit before anything else, and
 # this script run again with the same options when that changed it: an update takes the compose
-# files, ein.Containerfile and setup.sh as they are now, not as they were installed. The source is
+# files and setup.sh as they are now, not as they were installed. The source is
 # --source when given, else the one in .env; the token is EIN_SOURCE_KEY from the environment, else
 # from .env. A folder that is not a git clone is left as it is.
 update_self() {
@@ -383,6 +388,10 @@ host_of() {
   echo "${host,,}"
 }
 is_github() { [[ $(host_of "$1") =~ ^(www\.)?github\.com$ ]]; }
+
+# EiN's image is built here from core's sources when they come from a Forgejo or a Gitea, whose
+# commits may not be on GitHub, and pulled when they come from GitHub, which publishes it.
+ein_built() { ! is_github "$EIN_SOURCE"; }
 
 # A Forgejo or a Gitea source is where EiN installs its modules from too, with its token: core's
 # CFG_MODULE_SOURCES and CFG_MODULE_SOURCES_KEY (host[:port]=token), kept in step with the source.
@@ -483,6 +492,7 @@ write_override() {
           [ "$EIN_GPU" != 1 ] || lines+=("devices: [nvidia.com/gpu=all]")
           ;;
         ein)
+          ! ein_built || lines+=("image: localhost/ein-core" "build: { context: src/core, dockerfile: src/Containerfile }")
           [ "$EIN_LLM" != 1 ] || lines+=("environment:" "  CFG_LLM_CARD: $([ "$EIN_GPU" = 1 ] && echo card || echo cpu)")
           ;;
       esac
@@ -530,7 +540,8 @@ add_modules() {
   set_env EIN_MODULES "\"${names[*]}\""
 }
 
-# Every image, or the one service's when one is named. The model's is not built: compose up pulls it.
+# Every image, or the one service's when one is named: EiN's pulled or built (ein_built), the
+# database's and the media service's built. The model's is not built: compose up pulls it.
 build() {
   local one=${1:-}
   # Under podman the build's scratch files go next to its storage: /tmp is often too small for the
@@ -545,28 +556,33 @@ build() {
     echo "$(git -C src/ems describe --always --dirty) $(git -C src/ems log -1 --format=%cI)" >src/ems/ems/BUILD
   fi
   if [ -z "$one" ] || [ "$one" = ein ]; then
-    # What core's system-info says it runs, as a tree without its .git says it: the commit and its date.
-    git -C src/core log -1 --format='{"commit":"%h","date":"%cI"}' >src/core/src/build.json
-    "$engine" build -t localhost/ein-core -f src/core/src/Containerfile src/core
+    if ein_built; then
+      # What core's system-info says it runs, as a tree without its .git says it: the commit and its date.
+      git -C src/core log -1 --format='{"commit":"%h","date":"%cI"}' >src/core/src/build.json
+    else
+      "$engine" pull "$ein_image"
+    fi
   fi
+  # compose builds the services that have a build, and EiN only when the override gives it one.
   case $one in
     '') compose build ;;
     llm) ;;
+    ein) ! ein_built || compose build ein ;;
     *) compose build "$one" ;;
   esac
 }
 
-# The ids of the images build tags, localhost/ein before the localhost/ein-core it is built on.
+# The ids of the images build tags or pull.
 built_images() {
   local name
-  for name in localhost/ein localhost/ein-core localhost/ein-ems localhost/ein-db; do
+  for name in localhost/ein-core "$ein_image" localhost/ein-ems localhost/ein-db; do
     "$engine" image inspect --format '{{.Id}}' "$name" 2>/dev/null || true
   done
 }
 
 # The images named that lost their name to a new build, removed, and the space that freed said: each
 # update would otherwise leave its old images behind, the media service's about 30 GB. One still
-# named, or that a container uses, is kept; removing localhost/ein takes its old localhost/ein-core.
+# named, or that a container uses, is kept.
 remove_replaced() {
   local id store before after removed=0
   store=$(if [ "$engine" = podman ]; then podman info --format '{{.Store.GraphRoot}}'; else docker info --format '{{.DockerRootDir}}'; fi) || true

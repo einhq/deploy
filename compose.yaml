@@ -45,11 +45,10 @@ services:
   # originals, /old older originals, /files-volatile the renditions, /files-tmp scratch space. `z`
   # labels them shared under SELinux and is ignored elsewhere.
   ein:
-    # On core's own image, which setup.sh builds first as localhost/ein-core.
-    build:
-      context: .
-      dockerfile: ein.Containerfile
-    image: localhost/ein
+    # Core's image with its web interface built in, which GitHub publishes for every commit on main.
+    # From a Forgejo or a Gitea source, compose.override.yaml builds it here instead, as
+    # localhost/ein-core from src/core.
+    image: ghcr.io/einhq/core:main
     restart: unless-stopped
     stop_grace_period: 60s
     env_file: .env
