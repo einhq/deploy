@@ -14,7 +14,9 @@
 # An option once chosen is kept in .env, so a later run without it keeps it. With podman or Docker,
 # whichever is here (podman first; EIN_ENGINE=docker picks Docker), and its compose: `podman compose`
 # or `docker compose`, which work from this folder afterwards as usual (ps, logs, down, up -d). The
-# engine is kept in .env too: a later run uses it, whichever else is installed.
+# engine is kept in .env too: a later run uses it, whichever else is installed. Under podman-compose,
+# a container that `podman compose up -d` makes again, after a change to .env, has no swap limit:
+# this script gives each one (see start), and a run of it gives it back.
 #
 # --source names an organisation on GitHub, Forgejo or Gitea that has EiN's repositories under their
 # own names (default: https://github.com/einhq), such as http://forge.example:3000/ein. When it is a
@@ -122,6 +124,7 @@ main() {
   check_db_mount
   wait_for_ein
   after_reboot
+  modules_need
 }
 
 # One service fetched, built and restarted, the others left running: an update of EiN alone does not
@@ -183,6 +186,14 @@ start() {
   done
 }
 
+# A module that needs a service which is not installed here, said last, where it is read. The
+# Archive's photos, videos and documents are analysed by the media service.
+modules_need() {
+  if [[ " ${EIN_MODULES:-} " == *" archive "* ]] && [ "$EIN_EMS" != 1 ]; then
+    echo "The Archive module needs the media service, which is not installed here: ./setup.sh --ems adds it."
+  fi
+}
+
 # The engine kept in .env, or on the first run EIN_ENGINE, else podman, else Docker. Under the other
 # engine EiN would be a second one beside the first, without its database.
 pick_engine() {
@@ -242,7 +253,7 @@ write_env() {
 # EiN's settings, written by setup.sh on $(date +%F). Keep this file: the passwords below are in it
 # and nowhere else. compose reads it, and EiN and the media service get it as their environment, so
 # a CFG_ line for EiN or an EMS_ line for the media service goes here too. Apply a change with
-# ./setup.sh, or \`$engine compose up -d\` when no option changed.
+# ./setup.sh, or \`$engine compose up -d\` when no option changed.$(swap_note)
 
 # The compose project's name, which names its containers, network and volumes.
 COMPOSE_PROJECT_NAME=ein
@@ -296,6 +307,15 @@ EOF
 }
 
 secret() { openssl rand -hex 24; }
+
+# For .env's head under podman-compose: `up -d` leaves out the swap limit start gives each container.
+swap_note() {
+  [ "$compose_tool" = podman-compose ] || return 0
+  printf '\n%s' \
+    "# Under podman-compose, a container that \`podman compose up -d\` makes again has no swap limit," \
+    "# which setup.sh gives it: the media service's idle models then go to swap, and a search waits" \
+    "# for them. ./setup.sh makes the containers again with it."
+}
 
 set_env() {
   if grep -q "^$1=" .env; then sed -i "s|^$1=.*|$1=$2|" .env; else echo "$1=$2" >>.env; fi

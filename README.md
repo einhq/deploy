@@ -122,7 +122,9 @@ podman compose exec db pg_dump -U ein -Fc ein >ein.dump
 ## Settings
 
 `.env` is EiN's environment, so a `CFG_` setting for EiN goes there, and an `EMS_` one for the media
-service; `podman compose up -d` applies it. A hosted language model instead of `--llm` is its
+service; `podman compose up -d` applies it. Under podman-compose, a container that makes again has
+no swap limit, which `setup.sh` gives each one: the media service's idle models then go to swap, and
+a search waits for them. `./setup.sh` makes the containers again with it. A hosted language model instead of `--llm` is its
 address, key and name there (`CFG_LLM_URL`, `CFG_LLM_KEY`, `CFG_LLM_PROVIDER`), with examples in the
 file.
 
