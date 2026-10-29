@@ -13,7 +13,8 @@
 #
 # An option once chosen is kept in .env, so a later run without it keeps it. With podman or Docker,
 # whichever is here (podman first; EIN_ENGINE=docker picks Docker), and its compose: `podman compose`
-# or `docker compose`, which work from this folder afterwards as usual (ps, logs, down, up -d).
+# or `docker compose`, which work from this folder afterwards as usual (ps, logs, down, up -d). The
+# engine is kept in .env too: a later run uses it, whichever else is installed.
 #
 # --source names an organisation on GitHub, Forgejo or Gitea that has EiN's repositories under their
 # own names (default: https://github.com/einhq), such as http://forge.example:3000/ein. When it is a
@@ -182,13 +183,22 @@ start() {
   done
 }
 
+# The engine kept in .env, or on the first run EIN_ENGINE, else podman, else Docker. Under the other
+# engine EiN would be a second one beside the first, without its database.
 pick_engine() {
-  engine=${EIN_ENGINE:-}
+  local kept=
+  [ ! -f .env ] || kept=$(sed -n 's/^EIN_ENGINE=//p' .env)
+  if [ -n "$kept" ] && [ -n "${EIN_ENGINE:-}" ] && [ "$EIN_ENGINE" != "$kept" ]; then
+    fail "EiN here runs under $kept (EIN_ENGINE in .env); under $EIN_ENGINE it would be a second, empty EiN beside it. Run ./setup.sh without EIN_ENGINE=$EIN_ENGINE"
+  fi
+  engine=${kept:-${EIN_ENGINE:-}}
   if [ -z "$engine" ]; then
     if command -v podman >/dev/null; then engine=podman; elif command -v docker >/dev/null; then engine=docker; else
       fail "neither podman nor Docker is installed"
     fi
   fi
+  case $engine in podman | docker) ;; *) fail "EIN_ENGINE is podman or docker, not $engine" ;; esac
+  command -v "$engine" >/dev/null || fail "EiN here runs under $engine, which is not installed"
   "$engine" compose version >/dev/null 2>&1 ||
     fail "'$engine compose' does not run: install podman-compose (or docker-compose) for podman, or the compose plugin for Docker"
   # docker-compose under podman, when it is installed and podman-compose is not: it reaches podman
@@ -205,6 +215,7 @@ pick_engine() {
   if [ "$engine" = podman ] && [ "$(podman info --format '{{.Host.NetworkBackend}}')" = cni ] && ! has_dnsname; then
     fail "podman's networks here give no names, which EiN needs to find its database: install podman's CNI plugin dnsname (Debian and Ubuntu: golang-github-containernetworking-plugin-dnsname; Fedora: podman-plugins), then ./setup.sh again"
   fi
+  [ ! -f .env ] || [ -n "$kept" ] || set_env EIN_ENGINE "$engine"
 }
 
 has_dnsname() {
@@ -235,6 +246,10 @@ write_env() {
 
 # The compose project's name, which names its containers, network and volumes.
 COMPOSE_PROJECT_NAME=ein
+
+# The container engine, podman or docker, which setup.sh picked at the install and keeps to: under
+# the other one EiN would be a second, empty one.
+EIN_ENGINE=$engine
 
 # The options: the media service, the assistant's language model, and the graphics card for both.
 # setup.sh --ems / --llm sets the first two; it found a card with its CDI spec, or did not.

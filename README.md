@@ -41,8 +41,9 @@ database is the `ein_db` volume of the container engine, or the folder `--db-dir
 ## Running it
 
 `setup.sh` picks podman when it is installed and Docker otherwise (`EIN_ENGINE=docker` picks
-Docker). After the install, compose works from this folder as usual, and with every compose: each
-reads `compose.override.yaml` beside `compose.yaml` on its own, so the options are always in.
+Docker), and keeps the engine in `.env`: a later run uses it, whichever else is installed. After the
+install, compose works from this folder as usual, and with every compose: each reads
+`compose.override.yaml` beside `compose.yaml` on its own, so the options are always in.
 
 ```bash
 podman compose ps               # or docker compose
