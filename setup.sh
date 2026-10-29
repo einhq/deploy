@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # Installs EiN on this machine, and updates it when run again: brings this folder up to date from
-# the source's deploy, fetches the sources under src/, writes .env the first time, pulls EiN's image
-# and builds the others, and starts them with compose.
+# the source's deploy, writes .env the first time, fetches the sources it needs under src/, pulls
+# the images or builds them from those sources, and starts them with compose.
 #
 #   ./setup.sh                    EiN and its database; run again, the newest sources of what is here
 #   ./setup.sh --ems              also the media service: every media tool and model, about 30 GB
@@ -22,10 +22,11 @@
 #
 # --source names an organisation on GitHub, Forgejo or Gitea that has EiN's repositories under their
 # own names (default: https://github.com/einhq), such as http://forge.example:3000/ein. When it is a
-# Forgejo or a Gitea, EiN installs its modules from there too. EiN's image is pulled from GitHub's
-# registry only from https://github.com/einhq, which publishes it, and built here from any other
-# source's core. EIN_SOURCE_KEY in the environment is the token that reads it, when its repositories
-# are private; it is kept in .env with the source.
+# Forgejo or a Gitea, EiN installs its modules from there too. The images of EiN, its database and
+# the media service are pulled from GitHub's registry only from https://github.com/einhq, which
+# publishes them, and built here from any other source's core, db and ems. EIN_SOURCE_KEY in the
+# environment is the token that reads the source, when its repositories are private; it is kept in
+# .env with the source.
 #
 # Read the first time only, when .env is written:
 #   EIN_DATA       the folder for your originals, the renditions, scratch space and the model (default: ./data)
@@ -35,9 +36,6 @@ set -euo pipefail
 
 here=$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)
 cd "$here"
-
-# EiN's image as compose.yaml names it, which GitHub publishes from core.
-ein_image=ghcr.io/einhq/core:main
 
 main() {
   local args=("$@") want_ems= want_llm= modules=() source= db_dir= only= key=${EIN_SOURCE_KEY:-} options=0
@@ -110,11 +108,14 @@ main() {
   module_sources
   write_override
 
-  step "Fetching the sources"
-  ! ein_built || fetch core src/core
-  fetch db src/db
-  [ "$EIN_EMS" != 1 ] || fetch ems src/ems
-  [ "$EIN_LLM" != 1 ] || fetch llm src/llm
+  # The media service's source comes with its image too: its deploy/ has the fix for the card's CDI
+  # spec under podman before 5.
+  local repo repos=()
+  ! built || repos+=(core db)
+  [ "$EIN_EMS" != 1 ] || repos+=(ems)
+  [ "$EIN_LLM" != 1 ] || repos+=(llm)
+  [ ${#repos[@]} = 0 ] || step "Fetching the sources"
+  for repo in "${repos[@]}"; do fetch "$repo" "src/$repo"; done
 
   step "Getting the images$([ "$EIN_EMS" != 1 ] || echo ' (the media service the first time: about 30 GB)')"
   local old
@@ -153,8 +154,8 @@ main() {
 # restart the media service, the model or the database.
 update_one() {
   case $1 in
-    ein) ! ein_built || fetch core src/core ;;
-    db) fetch db src/db ;;
+    ein) ! built || fetch core src/core ;;
+    db) ! built || fetch db src/db ;;
     ems | llm)
       local option=EIN_${1^^}
       [ "${!option}" = 1 ] || fail "$1 is not installed here: ./setup.sh --$1 adds it"
@@ -398,11 +399,20 @@ host_of() {
 }
 is_github() { [[ $(host_of "$1") =~ ^(www\.)?github\.com$ ]]; }
 
-# EiN's image is pulled when the sources are GitHub's einhq, which publishes it, and built here from
-# core's sources when they come from anywhere else, whose commits that image does not have.
-ein_built() {
+# The images of EiN, the database and the media service are pulled when the sources are GitHub's
+# einhq, which publishes them, and built here from the sources when they come from anywhere else,
+# whose commits those images do not have.
+built() {
   local owner=${EIN_SOURCE##*/}
   ! is_github "$EIN_SOURCE" || [ "${owner,,}" != einhq ]
+}
+
+# The image a service runs, ein, db or ems: the one GitHub publishes from the repository of that
+# name (core for EiN), as compose.yaml and compose.ems.yaml name it, or the one built here.
+image_of() {
+  local repo=$1
+  [ "$repo" != ein ] || repo=core
+  if built; then echo "localhost/ein-$repo"; else echo "ghcr.io/einhq/$repo:main"; fi
 }
 
 # A Forgejo or a Gitea source is where EiN installs its modules from too, with its token: core's
@@ -425,7 +435,7 @@ set_db_dir() {
 # A command in the database's image as its root, with a folder or a volume mounted at /d with the
 # mount's options: the folder's owner and contents as the database sees them, which under rootless
 # podman this user cannot read itself.
-db_sh() { "$engine" run --rm --user 0 --entrypoint sh -v "$1:/d:$2" localhost/ein-db -c "$3"; }
+db_sh() { "$engine" run --rm --user 0 --entrypoint sh -v "$1:/d:$2" "$(image_of db)" -c "$3"; }
 
 # The database's folder given to the image's postgres user, before the database starts. Mounting it
 # with :z here labels it for the containers under SELinux once, so compose.yaml mounts it plainly
@@ -437,7 +447,7 @@ prepare_db_dir() {
     if "$engine" volume inspect ein_db >/dev/null 2>&1 && db_sh ein_db ro '[ -e /d/PG_VERSION ]'; then
       fail "the database is in the volume ein_db, and $EIN_DB_DIR is empty. Move it there first:
   $engine compose stop db
-  $engine run --rm --user 0 --entrypoint sh -v ein_db:/from:ro -v $EIN_DB_DIR:/to:z localhost/ein-db -c 'cp -a /from/. /to/'
+  $engine run --rm --user 0 --entrypoint sh -v ein_db:/from:ro -v $EIN_DB_DIR:/to:z $(image_of db) -c 'cp -a /from/. /to/'
 then run ./setup.sh again, and remove the volume once EiN shows your files: $engine volume rm ein_db"
     fi
   elif ! db_sh "$EIN_DB_DIR" z '[ -e /d/PG_VERSION ]'; then
@@ -501,12 +511,14 @@ write_override() {
           option=EIN_${service^^}
           [ "${!option}" = 1 ] || continue
           lines+=("extends: { file: compose.$service.yaml, service: $service }")
+          [ "$service" = llm ] || ! built || lines+=("image: $(image_of ems)" "build: { context: src/ems, dockerfile: Containerfile }")
           [ "$EIN_GPU" != 1 ] || lines+=("devices: [nvidia.com/gpu=all]")
           ;;
         ein)
-          ! ein_built || lines+=("image: localhost/ein-core" "build: { context: src/core, dockerfile: src/Containerfile }")
+          ! built || lines+=("image: $(image_of ein)" "build: { context: src/core, dockerfile: src/Containerfile }")
           [ "$EIN_LLM" != 1 ] || lines+=("environment:" "  CFG_LLM_CARD: $([ "$EIN_GPU" = 1 ] && echo card || echo cpu)")
           ;;
+        db) ! built || lines+=("image: $(image_of db)" "build: { context: src/db, dockerfile: Containerfile }") ;;
       esac
       [ "$engine" != podman ] || lines+=("restart: always")
       [ ${#lines[@]} != 0 ] || continue
@@ -552,43 +564,45 @@ add_modules() {
   set_env EIN_MODULES "\"${names[*]}\""
 }
 
-# Every image, or the one service's when one is named: EiN's pulled or built (ein_built), the
-# database's and the media service's built. The model's is not built: compose up pulls it.
+# Every image, or the one service's when one is named: EiN's, the database's and the media service's
+# pulled, or built from their sources (built). The model's is neither: compose up pulls it.
 build() {
-  local one=${1:-}
-  # Under podman the build's scratch files go next to its storage: /tmp is often too small for the
-  # media service's layers. Docker keeps them in its own storage already.
+  local one=${1:-} service services=()
+  for service in ein db ems; do
+    [ -z "$one" ] || [ "$one" = "$service" ] || continue
+    [ "$service" != ems ] || [ "$EIN_EMS" = 1 ] || continue
+    services+=("$service")
+  done
+  [ ${#services[@]} != 0 ] || return 0
+  # Under podman a pull's and a build's scratch files go next to its storage: /tmp is often too
+  # small for the media service's layers. Docker keeps them in its own storage already.
   if [ "$engine" = podman ]; then
     TMPDIR="$(podman info --format '{{.Store.GraphRoot}}')/tmp"
     mkdir -p "$TMPDIR"
     export TMPDIR
   fi
-  if [ "$EIN_EMS" = 1 ] && { [ -z "$one" ] || [ "$one" = ems ]; }; then
-    # What the media service's health reports as its build, as its own Makefile writes it.
-    echo "$(git -C src/ems describe --always --dirty) $(git -C src/ems log -1 --format=%cI)" >src/ems/ems/BUILD
+  if ! built; then
+    for service in "${services[@]}"; do "$engine" pull "$(image_of "$service")"; done
+    return
   fi
-  if [ -z "$one" ] || [ "$one" = ein ]; then
-    if ein_built; then
+  for service in "${services[@]}"; do
+    case $service in
       # What core's system-info says it runs, as a tree without its .git says it: the commit and its date.
-      git -C src/core log -1 --format='{"commit":"%h","date":"%cI"}' >src/core/src/build.json
-    else
-      "$engine" pull "$ein_image"
-    fi
-  fi
-  # compose builds the services that have a build, and EiN only when the override gives it one.
-  case $one in
-    '') compose build ;;
-    llm) ;;
-    ein) ! ein_built || compose build ein ;;
-    *) compose build "$one" ;;
-  esac
+      ein) git -C src/core log -1 --format='{"commit":"%h","date":"%cI"}' >src/core/src/build.json ;;
+      # What the media service's health reports as its build, as its own Makefile writes it.
+      ems) echo "$(git -C src/ems describe --always --dirty) $(git -C src/ems log -1 --format=%cI)" >src/ems/ems/BUILD ;;
+    esac
+  done
+  compose build "${services[@]}"
 }
 
 # The ids of the images build tags or pull.
 built_images() {
-  local name
-  for name in localhost/ein-core "$ein_image" localhost/ein-ems localhost/ein-db; do
-    "$engine" image inspect --format '{{.Id}}' "$name" 2>/dev/null || true
+  local repo name
+  for repo in core db ems; do
+    for name in "localhost/ein-$repo" "ghcr.io/einhq/$repo:main"; do
+      "$engine" image inspect --format '{{.Id}}' "$name" 2>/dev/null || true
+    done
   done
 }
 

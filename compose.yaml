@@ -1,8 +1,9 @@
 # EiN on one machine: its database and EiN itself. Plain Compose Spec, so `docker compose` and
-# `podman compose` read it alike. setup.sh fetches the sources under src/, writes .env, and writes
-# compose.override.yaml, which every compose reads beside this file, for the options chosen: the
-# media service (compose.ems.yaml) and the assistant's language model (compose.llm.yaml). Under
-# podman it gives every service restart: always, the policy podman starts again at boot.
+# `podman compose` read it alike. setup.sh writes .env, fetches the sources under src/ that it
+# needs, and writes compose.override.yaml, which every compose reads beside this file, for the
+# options chosen: the media service (compose.ems.yaml) and the assistant's language model
+# (compose.llm.yaml). Under podman it gives every service restart: always, the policy podman starts
+# again at boot.
 #
 # EiN is the one published: 8080 the web interface, 2222 SSH and SFTP. The other services answer on
 # the compose network alone.
@@ -13,11 +14,11 @@
 # name in this file.
 
 services:
+  # PostgreSQL with TimescaleDB, pgvector and PostGIS, which GitHub publishes from ein/db. From any
+  # source but GitHub's einhq, compose.override.yaml builds it here instead, as localhost/ein-db
+  # from src/db.
   db:
-    build:
-      context: src/db
-      dockerfile: Containerfile
-    image: localhost/ein-db
+    image: ghcr.io/einhq/db:main
     restart: unless-stopped
     environment:
       POSTGRES_USER: ein

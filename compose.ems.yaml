@@ -2,12 +2,12 @@
 # names it in compose.override.yaml, with the graphics card when there is one. It mounts EiN's four
 # data folders at the same paths EiN does, the originals read-only. It reads .env as its
 # environment, so an EMS_ line added there reaches it at the next `up -d`.
+#
+# The image is the one GitHub publishes from ein/ems. From any source but GitHub's einhq,
+# compose.override.yaml builds it here instead, as localhost/ein-ems from src/ems.
 services:
   ems:
-    build:
-      context: src/ems
-      dockerfile: Containerfile
-    image: localhost/ein-ems
+    image: ghcr.io/einhq/ems:main
     restart: unless-stopped
     stop_grace_period: 60s
     env_file: .env

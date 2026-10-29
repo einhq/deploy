@@ -14,7 +14,7 @@ the modules are added to it with options, at the first install or any time after
 ./setup.sh --ems              # the media service: every media tool and model, an image of about 30 GB
 ./setup.sh --llm              # the assistant's language model, Qwen3.5-4B in llama.cpp
 ./setup.sh --module archive   # a module, which EiN installs at its start with the modules it needs (archive needs ems)
-./setup.sh                    # update: this folder, EiN's newest image and its services' newest sources, rebuilt and restarted
+./setup.sh                    # update: this folder and the newest images, pulled and restarted
 ./setup.sh --only ein         # update one service, ein, ems, db or llm, and restart only it
 ```
 
@@ -26,9 +26,9 @@ chosen once is kept in `.env`; `--no-ems` and `--no-llm` leave one out again, an
 compose.yaml          EiN and PostgreSQL: the base every install runs
 compose.ems.yaml      the media service, which --ems adds
 compose.llm.yaml      the language model, which --llm adds
-setup.sh              updates this folder, fetches the sources, writes .env and compose.override.yaml, pulls and builds, starts
+setup.sh              updates this folder, writes .env and compose.override.yaml, pulls or builds the images, starts
 
-src/                  the sources setup.sh builds: db, ems and llm with their options, and core from your own
+src/                  the sources setup.sh fetches: ems and llm with their options, and core and db from your own
 .env                  the settings, with the passwords made at the install
 compose.override.yaml the options in .env as services, and podman's restart policy, written by setup.sh
 data/                 your files and the installed modules, unless EIN_DATA named another folder at the install
@@ -39,9 +39,11 @@ folder up to date from the source's `deploy` (a fast-forward `git pull`), and ru
 when that changed it, so an update takes the compose files and the script as they are now. A local
 commit or change here that the pull cannot pass stops it, and `git status` says why.
 
-EiN's image, `ghcr.io/einhq/core:main`, is pulled: GitHub builds it from core for every commit on its
-`main`, with the web interface built in. From another source it is built here instead (below). The database's and the media service's are built here from
-their sources, and the model's is llama.cpp's own.
+The images are pulled: GitHub builds them for every commit on the `main` of their repositories,
+EiN's as `ghcr.io/einhq/core:main` with the web interface built in, the database's as
+`ghcr.io/einhq/db:main` (and again every week, for PostgreSQL's minor releases) and the media
+service's as `ghcr.io/einhq/ems:main`. From another source they are built here instead (below). The
+model's is llama.cpp's own.
 
 Back up `.env` and the data folder; the database is the `ein_db` volume of the container engine, or
 the folder `--db-dir` named.
@@ -104,8 +106,10 @@ curl -fsSL -H "Authorization: token $K" 'http://forge.example:3000/api/v1/repos/
 
 `.env` keeps them as `EIN_SOURCE` and `EIN_SOURCE_KEY`, so every update fetches from the same place;
 `--source` again moves an installation to another. git gets the token as a header for each call, so
-it is in no `.git/config`. From any source but GitHub's `einhq`, EiN's image is built here from
-core's sources, as `localhost/ein-core`, since the published image has none of their own commits.
+it is in no `.git/config`. From any source but GitHub's `einhq`, the images of EiN, the database and
+the media service are built here from the sources of core, db and ems, as `localhost/ein-core`,
+`localhost/ein-db` and `localhost/ein-ems`, since the published images have none of their own
+commits. The media service's build fetches its wheels and models for about an hour.
 From a Forgejo or a Gitea, EiN installs its modules from there too: setup.sh writes
 `CFG_MODULE_SOURCES` and `CFG_MODULE_SOURCES_KEY` into `.env` for it, and Settings → Modules lists
 that organisation's modules.
