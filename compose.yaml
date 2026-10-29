@@ -46,7 +46,7 @@ services:
   # labels them shared under SELinux and is ignored elsewhere.
   ein:
     # Core's image with its web interface built in, which GitHub publishes for every commit on main.
-    # From a Forgejo or a Gitea source, compose.override.yaml builds it here instead, as
+    # From any source but GitHub's einhq, compose.override.yaml builds it here instead, as
     # localhost/ein-core from src/core.
     image: ghcr.io/einhq/core:main
     restart: unless-stopped

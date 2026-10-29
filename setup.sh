@@ -22,9 +22,10 @@
 #
 # --source names an organisation on GitHub, Forgejo or Gitea that has EiN's repositories under their
 # own names (default: https://github.com/einhq), such as http://forge.example:3000/ein. When it is a
-# Forgejo or a Gitea, EiN's image is built here from its core rather than pulled from GitHub's
-# registry, and EiN installs its modules from there too. EIN_SOURCE_KEY in the environment is
-# the token that reads it, when its repositories are private; it is kept in .env with the source.
+# Forgejo or a Gitea, EiN installs its modules from there too. EiN's image is pulled from GitHub's
+# registry only from https://github.com/einhq, which publishes it, and built here from any other
+# source's core. EIN_SOURCE_KEY in the environment is the token that reads it, when its repositories
+# are private; it is kept in .env with the source.
 #
 # Read the first time only, when .env is written:
 #   EIN_DATA       the folder for your originals, the renditions, scratch space and the model (default: ./data)
@@ -397,9 +398,12 @@ host_of() {
 }
 is_github() { [[ $(host_of "$1") =~ ^(www\.)?github\.com$ ]]; }
 
-# EiN's image is built here from core's sources when they come from a Forgejo or a Gitea, whose
-# commits may not be on GitHub, and pulled when they come from GitHub, which publishes it.
-ein_built() { ! is_github "$EIN_SOURCE"; }
+# EiN's image is pulled when the sources are GitHub's einhq, which publishes it, and built here from
+# core's sources when they come from anywhere else, whose commits that image does not have.
+ein_built() {
+  local owner=${EIN_SOURCE##*/}
+  ! is_github "$EIN_SOURCE" || [ "${owner,,}" != einhq ]
+}
 
 # A Forgejo or a Gitea source is where EiN installs its modules from too, with its token: core's
 # CFG_MODULE_SOURCES and CFG_MODULE_SOURCES_KEY (host[:port]=token), kept in step with the source.
