@@ -291,6 +291,11 @@ POSTGRES_PASSWORD=$(secret)
 EMS_KEY=$(secret)
 TZ=$(timedatectl show -p Timezone --value 2>/dev/null || cat /etc/timezone 2>/dev/null || echo UTC)
 
+# The admin account's first password, which EiN takes at its first start; changing it here later
+# does nothing. setup.sh shows it at the end of each run until you delete this line: do that once
+# you have changed the password in EiN.
+INITIAL_ADMIN_PASSWORD=$(openssl rand -hex 8)
+
 # The web interface and SSH, on every address of this machine. 127.0.0.1 keeps them to this machine,
 # behind an HTTPS proxy of your own.
 EIN_BIND=0.0.0.0
@@ -583,17 +588,16 @@ remove_replaced() {
 # storage is inside its virtual machine).
 free_bytes() { df -B1 --output=avail "$1" 2>/dev/null | tail -1 || true; }
 
-# EiN answers once its database is up and its boot is through. A new instance prints its admin
-# password to the log, once.
+# EiN answers once its database is up and its boot is through.
 wait_for_ein() {
-  local url="http://127.0.0.1:$EIN_HTTP_PORT/" password id line last= down=0
+  local url="http://127.0.0.1:$EIN_HTTP_PORT/" id line last= down=0
   echo "Waiting for EiN to answer at $url; its first start takes a minute or more"
   for i in $(seq 300); do
     if curl -fs -o /dev/null --max-time 5 "$url"; then
       echo
       echo "EiN is up at http://$(hostname):$EIN_HTTP_PORT/"
-      password=$(compose logs ein 2>/dev/null | sed -n 's/.*Admin password set to: //p' | tail -1)
-      [ -z "$password" ] || echo "Sign in as admin with the password $password, and change it: it is shown this once."
+      [ -z "${INITIAL_ADMIN_PASSWORD:-}" ] ||
+        echo "Sign in as admin with the password $INITIAL_ADMIN_PASSWORD and change it, then delete the line INITIAL_ADMIN_PASSWORD from $here/.env."
       return
     fi
     # A container that stopped, or that its engine restarts again and again, does not come up by

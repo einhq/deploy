@@ -61,8 +61,9 @@ something else on the machine has one, `setup.sh` takes the next free port and s
 `EIN_BIND=127.0.0.1` in `.env` to keep them to the machine behind an HTTPS proxy of your own. The
 database, the media service and the model are reached only by EiN, on the compose network.
 
-A new instance prints its admin password once, and `setup.sh` shows it at the end; sign in as
-`admin` and change it.
+The admin account's first password is `INITIAL_ADMIN_PASSWORD` in `.env`, which EiN takes at its
+first start, and `setup.sh` shows it at the end of every run while that line is there. Sign in as
+`admin`, change the password, and delete the line.
 
 EiN starts again when the machine does, and `setup.sh` ends by saying whether it will. Docker's
 daemon starts it when Docker is enabled at boot. Under podman, `podman-restart.service` starts it,
