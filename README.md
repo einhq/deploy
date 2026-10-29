@@ -131,9 +131,12 @@ file.
 ## The graphics card
 
 The first `setup.sh` gives an NVIDIA card to the media service and the model when it finds one with
-its CDI spec (`EIN_GPU=1` in `.env`): podman passes it always, Docker from Engine 28.2, where CDI is
-on by default. The spec comes from nvidia-container-toolkit 1.18 and newer; ems's README sets it up.
-Without a card everything runs on the processor, more slowly.
+its CDI spec (`EIN_GPU=1` in `.env`): podman passes it, Docker from Engine 28.2, where CDI is on by
+default. The spec comes from nvidia-container-toolkit 1.18 and newer; ems's README sets it up.
+Podman before 5 (4.9.3 on Ubuntu 24.04 and Mint 22) rejects the spec the toolkit 1.17 and newer
+writes (`unknown field "additionalGids"`) and the containers find no card; with `--ems`,
+`sudo bash src/ems/deploy/install-cdi-refresh.sh` makes the spec readable to it after every refresh.
+The installer reports both. Without a card everything runs on the processor, more slowly.
 
 ## Licence
 
