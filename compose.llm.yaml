@@ -1,18 +1,44 @@
 # The assistant's language model, as an option: setup.sh --llm names it in compose.override.yaml,
 # with the graphics card when there is one. llama.cpp's server, fetching the model into EIN_DATA/llm
-# on its first start. On the card it takes the layers that leave LLM_CARD_RESERVE_MB free for the
-# media service; llm's README explains the share.
+# on its first start. On the card it takes as many layers as leave the media service
+# LLM_CARD_RESERVE_MB of it; llm's README explains the share.
+#
+# llama.cpp fits its layers into what is free when it starts, less a margin (--fit-target). The
+# entrypoint works the margin out at every start, the container's restarts included, as the
+# reserve less what others hold on the card then, so the model gets the same share whether the
+# media service started before it or after. A card that leaves no more than 1 GB beside the
+# reserve, or no card at all (nvidia-smi is there only when the card is), runs it on the CPU.
 services:
   llm:
     image: ${LLM_IMAGE:-ghcr.io/ggml-org/llama.cpp:server-cuda@sha256:bfb3264fc2166e01e2b4f9b537e45d7006d87c75021b911f132ef607f5bbced3}
     restart: unless-stopped
     environment:
       LLAMA_CACHE: /models
+      LLM_CARD_RESERVE_MB: ${LLM_CARD_RESERVE_MB:-8800}
     mem_limit: ${LLM_MEMORY:-10g}
     memswap_limit: ${LLM_MEMORY:-10g}
     volumes:
       - ${EIN_DATA}/llm:/models:z
       - ./src/llm/templates:/templates:ro,z
+    entrypoint:
+      - /bin/sh
+      - -c
+      - |
+          used= total=
+          if card=$$(nvidia-smi --query-gpu=memory.used,memory.total --format=csv,noheader,nounits 2>/dev/null); then
+            IFS=', ' read -r used total rest <<EOF
+          $$card
+          EOF
+          fi
+          if [ -n "$$total" ] && [ $$((total - LLM_CARD_RESERVE_MB)) -gt 1024 ]; then
+            margin=$$((LLM_CARD_RESERVE_MB - used))
+            [ "$$margin" -ge 1024 ] || margin=1024
+            echo "llm: $$((total - LLM_CARD_RESERVE_MB)) MB of the card, $$used MB of it in use by others: $$margin MB left free beside the model"
+            exec /app/llama-server "$$@" -ngl auto --fit on --fit-target "$$margin"
+          fi
+          [ -z "$$total" ] || echo "llm: no room on the card beside the $$LLM_CARD_RESERVE_MB MB it leaves the media service: on the CPU"
+          exec /app/llama-server "$$@" -ngl 0
+      - llm
     command:
       - --hf-repo
       - ${LLM_GGUF_REPO:-unsloth/Qwen3.5-4B-GGUF}
@@ -24,12 +50,6 @@ services:
       - 0.0.0.0
       - --port
       - '8190'
-      - -ngl
-      - auto
-      - --fit
-      - 'on'
-      - --fit-target
-      - ${LLM_CARD_RESERVE_MB:-8800}
       - -c
       - '32768'
       - -np
