@@ -105,12 +105,13 @@ curl -fsSL -H "Authorization: token $K" 'http://forge.example:3000/api/v1/repos/
 ```
 
 `.env` keeps them as `EIN_SOURCE` and `EIN_SOURCE_KEY`, so every update fetches from the same place;
-`--source` again moves an installation to another. git gets the token as a header for each call, so
-it is in no `.git/config`. From any source but GitHub's `einhq`, the images of EiN, the database and
-the media service are built here from the sources of core, db and ems, as `localhost/ein-core`,
-`localhost/ein-db` and `localhost/ein-ems`, since the published images have none of their own
-commits. The media service's build fetches its wheels and models for about an hour.
-From a Forgejo or a Gitea, EiN installs its modules from there too: setup.sh writes
+`--source` again moves an installation to another. A source on another host, such as GitHub again,
+drops the token, unless `EIN_SOURCE_KEY` gives a new one with it. git gets the token as a header for
+each call, so it is in no `.git/config`. From any source but GitHub's `einhq`, the images of EiN,
+the database and the media service are built here from the sources of core, db and ems, as
+`localhost/ein-core`, `localhost/ein-db` and `localhost/ein-ems`, since the published images have
+none of their own commits. The media service's build fetches its wheels and models for about an
+hour. From a Forgejo or a Gitea, EiN installs its modules from there too: setup.sh writes
 `CFG_MODULE_SOURCES` and `CFG_MODULE_SOURCES_KEY` into `.env` for it, and Settings → Modules lists
 that organisation's modules.
 

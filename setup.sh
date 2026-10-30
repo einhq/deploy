@@ -26,7 +26,7 @@
 # the media service are pulled from GitHub's registry only from https://github.com/einhq, which
 # publishes them, and built here from any other source's core, db and ems. EIN_SOURCE_KEY in the
 # environment is the token that reads the source, when its repositories are private; it is kept in
-# .env with the source.
+# .env with the source, and a --source on another host without a token of its own drops it.
 #
 # Read the first time only, when .env is written:
 #   EIN_DATA       the folder for your originals, the renditions, scratch space and the model (default: ./data)
@@ -101,8 +101,8 @@ main() {
   [ -z "$want_ems" ] || set_env EIN_EMS "$want_ems"
   [ -z "$want_llm" ] || set_env EIN_LLM "$want_llm"
   [ ${#modules[@]} = 0 ] || add_modules "${modules[@]}"
-  [ -z "$key" ] || set_env EIN_SOURCE_KEY "$key"
   [ -z "$source" ] || set_source "$source"
+  [ -z "$key" ] || set_env EIN_SOURCE_KEY "$key"
   [ -z "$db_dir" ] || set_db_dir "$db_dir"
   load_env
   module_sources
@@ -363,14 +363,16 @@ load_env() {
 # this script run again with the same options when that changed it: an update takes the compose
 # files and setup.sh as they are now, not as they were installed. The source is
 # --source when given, else the one in .env; the token is EIN_SOURCE_KEY from the environment, else
-# from .env. A folder that is not a git clone is left as it is.
+# from .env when the source is on .env's host. A folder that is not a git clone is left as it is.
 update_self() {
-  local source=$1 before after
+  local source=$1 installed= before after
   shift
   [ -e .git ] || return 0
-  [ -n "$source" ] || [ ! -f .env ] || source=$(sed -n 's/^EIN_SOURCE=//p' .env)
+  [ ! -f .env ] || installed=$(sed -n 's/^EIN_SOURCE=//p' .env)
+  source=${source:-$installed}
   local EIN_SOURCE_KEY=${EIN_SOURCE_KEY:-}
-  [ -n "$EIN_SOURCE_KEY" ] || [ ! -f .env ] || EIN_SOURCE_KEY=$(sed -n 's/^EIN_SOURCE_KEY=//p' .env)
+  [ -n "$EIN_SOURCE_KEY" ] || [ -z "$installed" ] || [ "$(host_of "$source")" != "$(host_of "$installed")" ] ||
+    EIN_SOURCE_KEY=$(sed -n 's/^EIN_SOURCE_KEY=//p' .env)
   [ -z "$source" ] || git remote set-url origin "$source/deploy.git"
   before=$(git rev-parse HEAD)
   git_source pull --ff-only --quiet ||
@@ -383,12 +385,16 @@ update_self() {
 
 # An organisation's address, https://host/owner, as the source of the sources and the modules. Back
 # on GitHub, the module settings a Forgejo or a Gitea source wrote go again, and EiN's default holds.
+# On another host the token goes too, which that host would refuse: main sets the one given with
+# --source after this.
 set_source() {
-  local url=$1
-  if is_github "$url" && ! is_github "$(sed -n 's/^EIN_SOURCE=//p' .env)"; then
+  local url=$1 installed
+  installed=$(sed -n 's/^EIN_SOURCE=//p' .env)
+  if is_github "$url" && ! is_github "$installed"; then
     unset_env CFG_MODULE_SOURCES
     unset_env CFG_MODULE_SOURCES_KEY
   fi
+  [ "$(host_of "$url")" = "$(host_of "$installed")" ] || set_env EIN_SOURCE_KEY ""
   set_env EIN_SOURCE "$url"
 }
 
