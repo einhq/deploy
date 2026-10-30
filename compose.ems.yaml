@@ -22,8 +22,11 @@ services:
       - ${EIN_DATA}/old:/old:ro,z
       - ${EIN_DATA}/files-volatile:/files-volatile:z
       - ${EIN_DATA}/files-tmp:/files-tmp:z
+    # Unhealthy after minutes without an answer: a crawl can stall every check on the host for a
+    # while, and EMS keeps serving through it.
     healthcheck:
       test: [CMD, python3, -m, ems.healthcheck]
       interval: 30s
-      timeout: 15s
+      timeout: 60s
+      retries: 5
       start_period: 120s
