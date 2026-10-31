@@ -39,10 +39,10 @@ folder up to date from the source's `deploy` (a fast-forward `git pull`), and ru
 when that changed it, so an update takes the compose files and the script as they are now. A local
 commit or change here that the pull cannot pass stops it, and `git status` says why.
 
-The images are pulled: GitHub builds them for every commit on the `main` of their repositories,
-EiN's as `ghcr.io/einhq/core:main` with the web interface built in, the database's as
-`ghcr.io/einhq/db:main` (and again every week, for PostgreSQL's minor releases) and the media
-service's as `ghcr.io/einhq/ems:main`. From another source they are built here instead (below). The
+The images are pulled: GitHub builds them once a day from the `main` of their repositories, when it
+has moved since the last build, EiN's as `ghcr.io/einhq/core:main` with the web interface built in,
+the database's as `ghcr.io/einhq/db:main` (and again every week, for PostgreSQL's minor releases)
+and the media service's as `ghcr.io/einhq/ems:main`. From another source they are built here instead (below). The
 model's is llama.cpp's own.
 
 Back up `.env` and the data folder; the database is the `ein_db` volume of the container engine, or
