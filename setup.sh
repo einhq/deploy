@@ -309,7 +309,7 @@ TZ=$(timedatectl show -p Timezone --value 2>/dev/null || cat /etc/timezone 2>/de
 # The admin account's first password, which EiN takes at its first start; changing it here later
 # does nothing. setup.sh shows it at the end of each run until you delete this line: do that once
 # you have changed the password in EiN.
-INITIAL_ADMIN_PASSWORD=$(openssl rand -hex 8)
+INITIAL_ADMIN_PASSWORD=$(secret 8)
 
 # The web interface and SSH, on every address of this machine. 127.0.0.1 keeps them to this machine,
 # behind an HTTPS proxy of your own.
@@ -337,7 +337,8 @@ EOF
   echo "Wrote .env: your files go under $data"
 }
 
-secret() { openssl rand -hex 24; }
+# A random secret for .env, in hex: 24 bytes, or as many as given.
+secret() { head -c "${1:-24}" /dev/urandom | od -An -tx1 | tr -d ' \n'; }
 
 # For .env's head under podman-compose: `up -d` leaves out the swap limit start gives each container.
 swap_note() {
