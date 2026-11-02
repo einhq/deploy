@@ -592,6 +592,7 @@ build() {
     for service in "${services[@]}"; do "$engine" pull "$(image_of "$service")"; done
     return
   fi
+  local cached=()
   for service in "${services[@]}"; do
     case $service in
       # What core's system-info says it runs, as a tree without its .git says it: the commit and its date.
@@ -599,8 +600,12 @@ build() {
       # What the media service's health reports as its build, as its own Makefile writes it.
       ems) echo "$(git -C src/ems describe --always --dirty) $(git -C src/ems log -1 --format=%cI)" >src/ems/ems/BUILD ;;
     esac
+    [ "$service" = db ] || cached+=("$service")
   done
-  compose build "${services[@]}"
+  [ ${#cached[@]} = 0 ] || compose build "${cached[@]}"
+  # The database's PostgreSQL and extensions come at the newest release their apt repositories have,
+  # which a cached layer would keep from the build that made it.
+  [ ${#cached[@]} = ${#services[@]} ] || compose build --no-cache db
 }
 
 # The ids of the images build tags or pull.
