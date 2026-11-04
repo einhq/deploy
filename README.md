@@ -67,6 +67,16 @@ something else on the machine has one, `setup.sh` takes the next free port and s
 `EIN_BIND=127.0.0.1` in `.env` to keep them to the machine behind an HTTPS proxy of your own. The
 database, the media service and the model are reached only by EiN, on the compose network.
 
+Under rootless podman a port published on the compose network reaches EiN from an address of that
+network, so EiN would see every client as that one address. There EiN gets a network of its own
+instead, which keeps each client's address: pasta, or slirp4netns with its own port handler under
+podman-compose before 1.1, which knows no pasta. It then reaches the database, the media service and
+the model on the machine's loopback, where they are published on 127.0.0.1 alone: `EIN_DB_PORT`
+(15432), `EIN_EMS_PORT` (18181) and `EIN_LLM_PORT` (18190), each moved to the next free port like
+EiN's own. Under slirp4netns a proxy on the machine reaches EiN from 10.0.2.2, not from loopback, so
+EiN does not believe its forwarding headers. When neither is installed, `setup.sh` says so, and
+EiN stays on the compose network: install `passt`, which has pasta.
+
 The admin account's first password is `INITIAL_ADMIN_PASSWORD` in `.env`, which EiN takes at its
 first start, and `setup.sh` shows it at the end of every run while that line is there. Sign in as
 `admin`, change the password, and delete the line.

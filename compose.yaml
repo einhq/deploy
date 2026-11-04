@@ -6,7 +6,8 @@
 # again at boot.
 #
 # EiN is the one published: 8080 the web interface, 2222 SSH and SFTP. The other services answer on
-# the compose network alone.
+# the compose network alone, and under rootless podman, where EiN has a network of its own to see
+# each client's address, on the machine's loopback too (setup.sh's write_override).
 #
 # EiN reads .env as its environment, so a CFG_ line added there reaches it at the next `up -d`.
 #

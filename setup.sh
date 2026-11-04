@@ -254,7 +254,36 @@ pick_engine() {
     fail "podman's networks here give no names, which EiN needs to find its database: install podman's CNI plugin dnsname (Debian and Ubuntu: golang-github-containernetworking-plugin-dnsname; Fedora: podman-plugins), then ./setup.sh again"
   fi
   [ ! -f .env ] || [ -n "$kept" ] || set_env EIN_ENGINE "$engine"
+  pick_ein_network
 }
+
+# EiN's network under rootless podman, where a port published on the compose network reaches EiN
+# through rootlessport, from an address of that network, so every client would look like one: pasta,
+# or slirp4netns with its own port handler under podman-compose before 1.1, which knows no pasta.
+# Both keep the client's address. EiN then reaches the database, the media service and the model on
+# this machine's loopback, where they are published for it (the loopback ports below). Empty under
+# Docker and rootful podman, whose published ports keep the address, and where podman has neither.
+pick_ein_network() {
+  ein_network=
+  [ "$engine" = podman ] && [ "$(podman info --format '{{.Host.Security.Rootless}}')" = true ] || return 0
+  local version=
+  [ "$compose_tool" != podman-compose ] || version=$(podman compose version 2>&1 | sed -n 's/^podman-compose version:* //p')
+  if [ -n "$(podman info --format '{{.Host.Pasta.Executable}}' 2>/dev/null)" ] && ! [[ $version =~ ^(0\.|1\.0\.) ]]; then
+    ein_network=pasta
+  elif [ -n "$(podman info --format '{{.Host.Slirp4NetNS.Executable}}' 2>/dev/null)" ]; then
+    ein_network=slirp4netns
+  else
+    echo "Neither pasta nor slirp4netns is here, so EiN sees every client as one address of its network: install passt, which has pasta"
+  fi
+}
+
+# The loopback ports EiN reaches the database, the media service and the model on, when it has a
+# network of its own (pick_ein_network): each published on 127.0.0.1 alone, and moved to the next
+# free one like EiN's own ports.
+declare -A loopback_ports=([EIN_DB_PORT]=15432 [EIN_EMS_PORT]=18181 [EIN_LLM_PORT]=18190)
+
+# A service's loopback port as compose reads it in compose.override.yaml: from .env, or the default.
+loopback_port() { echo "\${EIN_${1^^}_PORT:-${loopback_ports[EIN_${1^^}_PORT]}}"; }
 
 has_dnsname() {
   local dir
@@ -491,15 +520,18 @@ check_db_mount() {
 }
 
 # EiN's ports, each moved to the next free one when something else on this machine listens on it,
-# such as another web server on 8080. Not while EiN runs: then it is EiN that holds them.
+# such as another web server on 8080; one that EiN's containers publish is EiN's own. With a network
+# of its own, the loopback ports too.
 free_ports() {
-  [ -z "$("$engine" ps -q --filter label=com.docker.compose.project=ein --filter label=com.docker.compose.service=ein)" ] || return 0
-  local name port
-  for name in EIN_HTTP_PORT EIN_SSH_PORT; do
-    port=${!name}
-    while port_taken "$port"; do port=$((port + 1)); done
-    [ "$port" != "${!name}" ] || continue
-    echo "Port ${!name} is taken on this machine: EiN uses $port instead ($name in .env)"
+  local name port was ours names=(EIN_HTTP_PORT EIN_SSH_PORT)
+  [ -z "$ein_network" ] || names+=("${!loopback_ports[@]}")
+  ours=$("$engine" ps --filter label=com.docker.compose.project=ein --format '{{.Ports}}')
+  for name in "${names[@]}"; do
+    was=${!name:-${loopback_ports[$name]}}
+    port=$was
+    while [[ $ours != *":$port->"* ]] && port_taken "$port"; do port=$((port + 1)); done
+    [ "$port" != "$was" ] || continue
+    echo "Port $was is taken on this machine: EiN uses $port instead ($name in .env)"
     set_env "$name" "$port"
     printf -v "$name" %s "$port"
   done
@@ -518,8 +550,23 @@ port_taken() {
 #
 # Under podman every service restarts always: at boot podman-restart.service starts only the
 # containers with that policy, and leaves unless-stopped ones down. Docker's daemon starts those too.
+#
+# With a network of its own (pick_ein_network), EiN finds the database, the media service and the
+# model by their names at this machine's loopback, on the loopback ports, which they are published
+# on: pasta forwards those ports from EiN's loopback to this machine's, and slirp4netns lets EiN
+# reach this machine's loopback, every port of it, at 10.0.2.2.
 write_override() {
-  local service option lines written=0
+  local service option lines env written=0 reached=() hosts=() forwards=()
+  local -A port_in=([db]=5432 [ems]=8181 [llm]=8190)
+  if [ -n "$ein_network" ]; then
+    reached=(db)
+    [ "$EIN_EMS" != 1 ] || reached+=(ems)
+    [ "$EIN_LLM" != 1 ] || reached+=(llm)
+    for service in "${reached[@]}"; do
+      hosts+=("\"$service:$([ "$ein_network" = pasta ] && echo 127.0.0.1 || echo 10.0.2.2)\"")
+      forwards+=("-T,$(loopback_port "$service")")
+    done
+  fi
   {
     echo "# Written by setup.sh from the options in .env and the container engine; edit those and run"
     echo "# setup.sh again."
@@ -536,10 +583,25 @@ write_override() {
           ;;
         ein)
           ! built || lines+=("image: $(image_of ein)" "build: { context: src/core, dockerfile: src/Containerfile }")
-          [ "$EIN_LLM" != 1 ] || lines+=("environment:" "  CFG_LLM_CARD: $([ "$EIN_GPU" = 1 ] && echo card || echo cpu)")
+          env=()
+          [ "$EIN_LLM" != 1 ] || env+=("CFG_LLM_CARD: $([ "$EIN_GPU" = 1 ] && echo card || echo cpu)")
+          if [ -n "$ein_network" ]; then
+            if [ "$ein_network" = pasta ]; then
+              lines+=("network_mode: \"pasta:$(IFS=,; echo "${forwards[*]}")\"")
+            else
+              lines+=("network_mode: \"slirp4netns:port_handler=slirp4netns,allow_host_loopback=true\"")
+            fi
+            lines+=("extra_hosts: [$(IFS=,; echo "${hosts[*]}")]")
+            env+=("POSTGRES_URL: postgres://ein:\${POSTGRES_PASSWORD}@db:$(loopback_port db)/ein")
+            [ "$EIN_EMS" != 1 ] || env+=("CFG_EMS_URL: http://ems:$(loopback_port ems)")
+            [ "$EIN_LLM" != 1 ] || [ -n "${CFG_LLM_URL:-}" ] || env+=("CFG_LLM_URL: http://llm:$(loopback_port llm)")
+          fi
+          [ ${#env[@]} = 0 ] || lines+=("environment:" "${env[@]/#/  }")
           ;;
         db) ! built || lines+=("image: $(image_of db)" "build: { context: src/db, dockerfile: Containerfile }") ;;
       esac
+      [ -z "$ein_network" ] || [ -z "${port_in[$service]:-}" ] ||
+        lines+=("ports: [\"127.0.0.1:$(loopback_port "$service"):${port_in[$service]}\"]")
       [ "$engine" != podman ] || lines+=("restart: always")
       [ ${#lines[@]} != 0 ] || continue
       echo "  $service:"
