@@ -74,7 +74,8 @@ podman-compose before 1.1, which knows no pasta. It then reaches the database, t
 the model on the machine's loopback, where they are published on 127.0.0.1 alone: `EIN_DB_PORT`
 (15432), `EIN_EMS_PORT` (18181) and `EIN_LLM_PORT` (18190), each moved to the next free port like
 EiN's own. Under slirp4netns a proxy on the machine reaches EiN from 10.0.2.2, not from loopback, so
-EiN does not believe its forwarding headers. When neither is installed, `setup.sh` says so, and
+EiN believes the forwarding headers of 10.0.2.2 too (`TRUSTED_PROXIES`, which takes the addresses
+`.env` names in it besides). When neither is installed, `setup.sh` says so, and
 EiN stays on the compose network: install `passt`, which has pasta.
 
 The admin account's first password is `INITIAL_ADMIN_PASSWORD` in `.env`, which EiN takes at its

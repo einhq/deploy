@@ -554,7 +554,9 @@ port_taken() {
 # With a network of its own (pick_ein_network), EiN finds the database, the media service and the
 # model by their names at this machine's loopback, on the loopback ports, which they are published
 # on: pasta forwards those ports from EiN's loopback to this machine's, and slirp4netns lets EiN
-# reach this machine's loopback, every port of it, at 10.0.2.2.
+# reach this machine's loopback, every port of it, at 10.0.2.2. A proxy on this machine reaches EiN
+# from there too under slirp4netns, so EiN believes its forwarding headers (TRUSTED_PROXIES), and
+# those of any proxy .env names in TRUSTED_PROXIES.
 write_override() {
   local service option lines env written=0 reached=() hosts=() forwards=()
   local -A port_in=([db]=5432 [ems]=8181 [llm]=8190)
@@ -590,6 +592,8 @@ write_override() {
               lines+=("network_mode: \"pasta:$(IFS=,; echo "${forwards[*]}")\"")
             else
               lines+=("network_mode: \"slirp4netns:port_handler=slirp4netns,allow_host_loopback=true\"")
+              # A proxy on this machine reaches EiN from 10.0.2.2, not from loopback.
+              env+=("TRUSTED_PROXIES: \"10.0.2.2,\${TRUSTED_PROXIES:-}\"")
             fi
             lines+=("extra_hosts: [$(IFS=,; echo "${hosts[*]}")]")
             env+=("POSTGRES_URL: postgres://ein:\${POSTGRES_PASSWORD}@db:$(loopback_port db)/ein")
