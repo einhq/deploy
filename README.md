@@ -37,7 +37,8 @@ data/                 your files and the installed modules, unless EIN_DATA name
 The last four are made here and are not in the repository. Every run of `setup.sh` first brings this
 folder up to date from the source's `deploy` (a fast-forward `git pull`), and runs the new `setup.sh`
 when that changed it, so an update takes the compose files and the script as they are now. A local
-commit or change here that the pull cannot pass stops it, and `git status` says why.
+commit or change here that the pull cannot pass stops it, and `git status` says why. One run at a time:
+a second waits for the first to end, under `flock` on this folder.
 
 The images are pulled: GitHub builds them once a day from the `main` of their repositories, when it
 has moved since the last build, EiN's as `ghcr.io/einhq/core:main` with the web interface built in,

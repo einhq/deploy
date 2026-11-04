@@ -78,6 +78,7 @@ main() {
     shift
   done
 
+  one_at_a_time "${args[@]}"
   update_self "$source" "${args[@]}"
   pick_engine
   if [ -n "$only" ]; then
@@ -360,6 +361,18 @@ load_env() {
   set -a && . ./.env && set +a
 }
 
+# One run in this folder at a time: this script runs again under flock, which holds a lock on the
+# folder until that run ends, and a second run waits for the first. A run goes on when the ssh that
+# started it is cut, and two at once would fetch the same sources together. -o keeps the lock out
+# of what the run starts, so a container's monitor does not hold it after the run. Without flock a
+# run goes on unlocked.
+one_at_a_time() {
+  [ -z "${EIN_SETUP_LOCKED:-}" ] && command -v flock >/dev/null || return 0
+  flock -n "$here" true || echo "Another setup.sh is running in $here; waiting for it to end"
+  export EIN_SETUP_LOCKED=1
+  exec flock -o "$here" "$here/setup.sh" "$@"
+}
+
 # This folder, a clone of the source's deploy, moved to its newest commit before anything else, and
 # this script run again with the same options when that changed it: an update takes the compose
 # files and setup.sh as they are now, not as they were installed. The source is
@@ -543,7 +556,8 @@ write_override() {
 fetch() {
   if [ -d "$2/.git" ]; then
     git -C "$2" remote set-url origin "$EIN_SOURCE/$1.git"
-    git_source -C "$2" pull --ff-only --quiet
+    git_source -C "$2" fetch --quiet origin
+    git -C "$2" merge --ff-only --quiet '@{upstream}'
   else
     git_source clone --quiet "$EIN_SOURCE/$1.git" "$2"
   fi
