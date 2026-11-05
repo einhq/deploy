@@ -8,6 +8,12 @@
 # reserve less what others hold on the card then, so the model gets the same share whether the
 # media service started before it or after. A card that leaves no more than 1 GB beside the
 # reserve, or no card at all (nvidia-smi is there only when the card is), runs it on the CPU.
+#
+# The cache of what it read is kept at 8 bits, half of f16's 1 GB at this context, and the vision
+# projector --hf-repo fetches beside the model, which no request uses, stays on the CPU: so the
+# whole model fits a 6.2 GB share. llama.cpp leaves the last layers off the card first, the 0.7 GB
+# output layer among them, and with those on the CPU it answers at a tenth of the speed
+# (ein/core#1016).
 services:
   llm:
     image: ${LLM_IMAGE:-ghcr.io/ggml-org/llama.cpp:server-cuda@sha256:bfb3264fc2166e01e2b4f9b537e45d7006d87c75021b911f132ef607f5bbced3}
@@ -56,6 +62,11 @@ services:
       - '1'
       - --cache-ram
       - '2048'
+      - --cache-type-k
+      - q8_0
+      - --cache-type-v
+      - q8_0
+      - --no-mmproj-offload
       - --jinja
       - --chat-template-file
       - /templates/qwen35-stable-history.jinja
