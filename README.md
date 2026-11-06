@@ -159,7 +159,8 @@ file.
 A media service that does not mount EiN's folders, such as one on another machine, reaches the files
 of its requests through EiN's `ems-files` service instead: `CFG_EMS_FILES_ADDRESS` in `.env` is the
 `host:port` the media service reaches it at, and while it is set `./setup.sh` publishes
-`CFG_EMS_FILES_PORT` (2224) on `EIN_BIND`.
+`CFG_EMS_FILES_PORT` (2224) on `EIN_BIND`. The media service reads them through an sshfs mount,
+for which its container has `/dev/fuse` and the `SYS_ADMIN` capability.
 
 ## The graphics card
 

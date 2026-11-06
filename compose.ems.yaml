@@ -1,7 +1,9 @@
 # The media service, every media tool and model behind one HTTP API, as an option: setup.sh --ems
 # names it in compose.override.yaml, with the graphics card when there is one. It mounts EiN's four
 # data folders at the same paths EiN does, the originals read-only. It reads .env as its
-# environment, so an EMS_ line added there reaches it at the next `up -d`.
+# environment, so an EMS_ line added there reaches it at the next `up -d`. It may also mount the
+# files of a request with sshfs, for which compose.override.yaml gives it /dev/fuse and this file
+# SYS_ADMIN, the capability to mount.
 #
 # The image is the one GitHub publishes from ein/ems. From any source but GitHub's einhq,
 # compose.override.yaml builds it here instead, as localhost/ein-ems from src/ems.
@@ -10,6 +12,7 @@ services:
     image: ghcr.io/einhq/ems:main
     restart: unless-stopped
     stop_grace_period: 60s
+    cap_add: [SYS_ADMIN]
     env_file: .env
     environment:
       EMS_PORT: 8181

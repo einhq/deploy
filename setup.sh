@@ -558,7 +558,7 @@ port_taken() {
 # from there too under slirp4netns, so EiN believes its forwarding headers (TRUSTED_PROXIES), and
 # those of any proxy .env names in TRUSTED_PROXIES.
 write_override() {
-  local service option lines env written=0 reached=() hosts=() forwards=()
+  local service option lines env devices written=0 reached=() hosts=() forwards=()
   local -A port_in=([db]=5432 [ems]=8181 [llm]=8190)
   if [ -n "$ein_network" ]; then
     reached=(db)
@@ -581,7 +581,11 @@ write_override() {
           [ "${!option}" = 1 ] || continue
           lines+=("extends: { file: compose.$service.yaml, service: $service }")
           [ "$service" = llm ] || ! built || lines+=("image: $(image_of ems)" "build: { context: src/ems, dockerfile: Containerfile }")
-          [ "$EIN_GPU" != 1 ] || lines+=("devices: [nvidia.com/gpu=all]")
+          devices=()
+          [ "$EIN_GPU" != 1 ] || devices+=(nvidia.com/gpu=all)
+          # The media service mounts the files of a request it does not share with sshfs (ems-files).
+          [ "$service" != ems ] || devices+=(/dev/fuse)
+          [ ${#devices[@]} = 0 ] || lines+=("devices: [$(IFS=,; echo "${devices[*]}")]")
           ;;
         ein)
           ! built || lines+=("image: $(image_of ein)" "build: { context: src/core, dockerfile: src/Containerfile }")
