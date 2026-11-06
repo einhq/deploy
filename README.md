@@ -160,7 +160,14 @@ A media service that does not mount EiN's folders, such as one on another machin
 of its requests through EiN's `ems-files` service instead: `CFG_EMS_FILES_ADDRESS` in `.env` is the
 `host:port` the media service reaches it at, and while it is set `./setup.sh` publishes
 `CFG_EMS_FILES_PORT` (2224) on `EIN_BIND`. The media service reads them through an sshfs mount,
-for which its container has `/dev/fuse` and the `SYS_ADMIN` capability.
+for which its container has `/dev/fuse` and the `SYS_ADMIN` capability. The kernel reads ahead only
+128 KiB on such a mount; on the machine the media service runs on, a udev rule raises it for every
+new one, a moment after the mount, when the setting holds:
+
+```bash
+echo 'ACTION=="add", SUBSYSTEM=="bdi", KERNEL=="0:*", RUN+="/bin/sh -c '\''sleep 1; echo 4096 > /sys/class/bdi/%k/read_ahead_kb'\''"' | sudo tee /etc/udev/rules.d/90-fuse-readahead.rules
+sudo udevadm control --reload
+```
 
 ## The graphics card
 
