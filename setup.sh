@@ -601,6 +601,10 @@ write_override() {
             [ "$EIN_LLM" != 1 ] || [ -n "${CFG_LLM_URL:-}" ] || env+=("CFG_LLM_URL: http://llm:$(loopback_port llm)")
           fi
           [ ${#env[@]} = 0 ] || lines+=("environment:" "${env[@]/#/  }")
+          # A media service without EiN's folders reaches the files of its requests on the
+          # ems-files port, which is published only while .env names the address it is reached at.
+          [ -z "${CFG_EMS_FILES_ADDRESS:-}" ] ||
+            lines+=("ports: [\"\${EIN_BIND:-0.0.0.0}:\${CFG_EMS_FILES_PORT:-2224}:\${CFG_EMS_FILES_PORT:-2224}\"]")
           ;;
         db) ! built || lines+=("image: $(image_of db)" "build: { context: src/db, dockerfile: Containerfile }") ;;
       esac

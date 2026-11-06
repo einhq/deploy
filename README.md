@@ -156,6 +156,11 @@ a search waits for them. `./setup.sh` makes the containers again with it. A host
 address, key and name there (`CFG_LLM_URL`, `CFG_LLM_KEY`, `CFG_LLM_PROVIDER`), with examples in the
 file.
 
+A media service that does not mount EiN's folders, such as one on another machine, reaches the files
+of its requests through EiN's `ems-files` service instead: `CFG_EMS_FILES_ADDRESS` in `.env` is the
+`host:port` the media service reaches it at, and while it is set `./setup.sh` publishes
+`CFG_EMS_FILES_PORT` (2224) on `EIN_BIND`.
+
 ## The graphics card
 
 The first `setup.sh` gives an NVIDIA card to the media service and the model when it finds one with
