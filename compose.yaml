@@ -29,8 +29,9 @@ services:
     command: [-c, ssl=off, -c, 'shared_preload_libraries=timescaledb,pg_stat_statements']
     # Parallel queries exchange rows through shared memory; the 64 MB default fails them under load.
     shm_size: 1g
-    # The volume ein_db in the engine's storage, or the folder EIN_DB_DIR names (setup.sh --db-dir),
-    # which setup.sh gives to the image's postgres user first, as the engine does for a volume.
+    # The folder EIN_DB_DIR names, db under EIN_DATA unless setup.sh --db-dir moved it, which
+    # setup.sh gives to the image's postgres user first, as the engine does for a volume. Empty, the
+    # volume ein_db in the engine's storage.
     volumes:
       - ${EIN_DB_DIR:-db}:/home/postgres/pgdata/data
     # Ready is a query that succeeds, not the first sign of life.

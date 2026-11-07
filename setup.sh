@@ -10,7 +10,7 @@
 #   ./setup.sh --no-ems --no-llm  leave an option out again; its data stays
 #   ./setup.sh --only ein         update one service, ein, ems, db or llm, and restart only it
 #   ./setup.sh --source URL       fetch the sources and the modules from this organisation instead
-#   ./setup.sh --db-dir DIR       keep the database in this folder instead of the engine's storage
+#   ./setup.sh --db-dir DIR       keep the database in this folder instead of db under EIN_DATA
 #
 # An option once chosen is kept in .env, so a later run without it keeps it. With podman or Docker,
 # whichever is here (podman first; EIN_ENGINE=docker picks Docker), and its compose: `podman compose`
@@ -29,7 +29,8 @@
 # .env with the source, and a --source on another host without a token of its own drops it.
 #
 # Read the first time only, when .env is written:
-#   EIN_DATA       the folder for your originals, the renditions, scratch space and the model (default: ./data)
+#   EIN_DATA       the folder for your originals, the renditions, scratch space, the model and the
+#                  database (default: ./data)
 #   EIN_HTTP_PORT  the web interface's port (default: 8080, or the next free one)
 #   EIN_SSH_PORT   SSH and SFTP's port (default: 2222, or the next free one)
 set -euo pipefail
@@ -304,6 +305,10 @@ write_env() {
     fail "the database of an earlier install is here, the volume ein_db, and its password was in the .env that is gone. Put that .env back, or remove the database for a new one: $engine volume rm ein_db"
   mkdir -p "$data"
   data=$(cd "$data" && pwd)
+  # The database's folder belongs to its postgres user, which this user cannot read under rootless
+  # podman or Docker: one that cannot be read holds an earlier install's database.
+  [ ! -d "$data/db" ] || { [ -r "$data/db" ] && [ -z "$(ls -A "$data/db")" ]; } ||
+    fail "the database of an earlier install is here, in $data/db, and its password was in the .env that is gone. Put that .env back, or remove the database for a new one: $(remove_dir_command) $data/db"
   if nvidia-smi >/dev/null 2>&1 && { [ -s /var/run/cdi/nvidia.yaml ] || compgen -G '/etc/cdi/nvidia*.yaml' >/dev/null; }; then gpu=1; fi
   cat >.env <<EOF
 # EiN's settings, written by setup.sh on $(date +%F). Keep this file: the passwords below are in it
@@ -359,13 +364,18 @@ EIN_SSH_PORT=${EIN_SSH_PORT:-2222}
 EIN_SOURCE=https://github.com/einhq
 EIN_SOURCE_KEY=
 
-# The database's folder: empty keeps it in the container engine's storage, as the volume ein_db.
-# setup.sh --db-dir sets it, to put the database on a faster disk than the one the files are on.
-EIN_DB_DIR=
+# The database's folder, beside your files so a backup of EIN_DATA holds it too. setup.sh --db-dir
+# moves it, such as onto a faster disk than the one the files are on; empty keeps it in the container
+# engine's storage, as the volume ein_db.
+EIN_DB_DIR=$data/db
 EOF
   chmod 600 .env
   echo "Wrote .env: your files go under $data"
 }
+
+# The command that removes a folder the database's postgres user owns: under rootless podman it
+# belongs to one of this user's subordinate ids, under Docker to root's.
+remove_dir_command() { if [ "$engine" = podman ] && [ "$(id -u)" != 0 ]; then echo "podman unshare rm -rf"; else echo "sudo rm -rf"; fi; }
 
 # A random secret for .env, in hex: 24 bytes, or as many as given.
 secret() { head -c "${1:-24}" /dev/urandom | od -An -tx1 | tr -d ' \n'; }

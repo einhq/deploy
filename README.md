@@ -31,7 +31,7 @@ setup.sh              updates this folder, writes .env and compose.override.yaml
 src/                  the sources setup.sh fetches: ems and llm with their options, and core and db from your own
 .env                  the settings, with the passwords made at the install
 compose.override.yaml the options in .env as services, and podman's restart policy, written by setup.sh
-data/                 your files and the installed modules, unless EIN_DATA named another folder at the install
+data/                 your files, the installed modules and the database, unless EIN_DATA named another folder at the install
 ```
 
 The last four are made here and are not in the repository. Every run of `setup.sh` first brings this
@@ -46,8 +46,8 @@ the database's as `ghcr.io/einhq/db:main` (and again every week, for PostgreSQL'
 and the media service's as `ghcr.io/einhq/ems:main`. From another source they are built here instead (below). The
 model's is llama.cpp's own.
 
-Back up `.env` and the data folder; the database is the `ein_db` volume of the container engine, or
-the folder `--db-dir` named.
+Back up `.env` and the data folder, which holds the database too, unless `--db-dir` put it
+elsewhere (below).
 
 ## Running it
 
@@ -129,10 +129,12 @@ that organisation's modules.
 
 ## The database
 
-The database is the `ein_db` volume, in the container engine's storage, unless `--db-dir` names a
-folder for it at the install (`EIN_DB_DIR` in `.env`). On a machine whose large disk is a spinning
-one, put it on the SSD: searching the archive reads its vector indexes at random, a few milliseconds
-a page on an SSD and tens of milliseconds on a spinning disk under load.
+The database is the folder `db` in the data folder, which a new install writes as `EIN_DB_DIR` in
+`.env`, so a backup of the data folder holds it. `--db-dir` names another folder for it. On a machine
+whose large disk is a spinning one, put it on the SSD: searching the archive reads its vector indexes
+at random, a few milliseconds a page on an SSD and tens of milliseconds on a spinning disk under load.
+An install whose `EIN_DB_DIR` is empty keeps it in the `ein_db` volume, in the container engine's
+storage.
 
 ```bash
 ./setup.sh --db-dir /srv/ssd/ein-db
@@ -141,7 +143,9 @@ a page on an SSD and tens of milliseconds on a spinning disk under load.
 setup.sh gives the folder to the database image's postgres user before the database starts, so under
 rootless podman it belongs to one of your subordinate ids: look into it with `podman unshare ls`. It
 takes an empty folder, or one a database is in. A database already in the volume is not left
-behind: setup.sh says how to copy it over first. A backup is the same either way:
+behind: setup.sh says how to copy it over first. A copy of the folder is a backup only while the
+database is stopped (`podman compose stop db`), and under rootless podman it is read with `podman
+unshare`. A dump is one while it runs, wherever it is:
 
 ```bash
 podman compose exec db pg_dump -U ein -Fc ein >ein.dump
