@@ -42,10 +42,10 @@ services:
 
   # The modules are EiN's to install, into the modules folder under EIN_DATA, which keeps them
   # across updates: the ones EIN_MODULES names (setup.sh --module adds one) at its start when they
-  # are missing, and any other from Settings → Modules. The four data folders are mounted at the
-  # paths the media service mounts them at, so a path EiN resolves is the path it opens: /files the
+  # are missing, and any other from Settings → Modules. The four data folders: /files the
   # originals, /old older originals, /files-volatile the renditions, /files-tmp scratch space. `z`
-  # labels them shared under SELinux and is ignored elsewhere.
+  # labels them shared under SELinux and is ignored elsewhere. The media service reaches the files
+  # of its requests at the ems-files port, CFG_EMS_FILES_ADDRESS, which setup.sh writes.
   ein:
     # Core's image with its web interface built in, which GitHub publishes for every commit on main.
     # From any source but GitHub's einhq, compose.override.yaml builds it here instead, as

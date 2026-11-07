@@ -1,9 +1,8 @@
 # The media service, every media tool and model behind one HTTP API, as an option: setup.sh --ems
-# names it in compose.override.yaml, with the graphics card when there is one. It mounts EiN's four
-# data folders at the same paths EiN does, the originals read-only. It reads .env as its
-# environment, so an EMS_ line added there reaches it at the next `up -d`. It may also mount the
-# files of a request with sshfs, for which compose.override.yaml gives it /dev/fuse and this file
-# SYS_ADMIN, the capability to mount.
+# names it in compose.override.yaml, with the graphics card when there is one. It mounts none of
+# EiN's folders: it mounts the files of each request from EiN's ems-files service with sshfs, for
+# which compose.override.yaml gives it /dev/fuse and this file SYS_ADMIN, the capability to mount.
+# It reads .env as its environment, so an EMS_ line added there reaches it at the next `up -d`.
 #
 # The image is the one GitHub publishes from ein/ems. From any source but GitHub's einhq,
 # compose.override.yaml builds it here instead, as localhost/ein-ems from src/ems.
@@ -17,14 +16,8 @@ services:
     environment:
       EMS_PORT: 8181
       EMS_KEY: ${EMS_KEY}
-      EMS_ROOTS: /files:ro,/old:ro,/files-volatile:rw,/files-tmp:rw
     mem_limit: ${EMS_MEMORY:-16g}
     memswap_limit: ${EMS_MEMORY:-16g}
-    volumes:
-      - ${EIN_DATA}/files:/files:ro,z
-      - ${EIN_DATA}/old:/old:ro,z
-      - ${EIN_DATA}/files-volatile:/files-volatile:z
-      - ${EIN_DATA}/files-tmp:/files-tmp:z
     # Unhealthy after minutes without an answer: a crawl can stall every check on the host for a
     # while, and EMS keeps serving through it.
     healthcheck:

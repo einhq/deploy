@@ -156,11 +156,13 @@ a search waits for them. `./setup.sh` makes the containers again with it. A host
 address, key and name there (`CFG_LLM_URL`, `CFG_LLM_KEY`, `CFG_LLM_PROVIDER`), with examples in the
 file.
 
-A media service that does not mount EiN's folders, such as one on another machine, reaches the files
-of its requests through EiN's `ems-files` service instead: `CFG_EMS_FILES_ADDRESS` in `.env` is the
-`host:port` the media service reaches it at, and while it is set `./setup.sh` publishes
-`CFG_EMS_FILES_PORT` (2224) on `EIN_BIND`. The media service reads them through an sshfs mount,
-for which its container has `/dev/fuse` and the `SYS_ADMIN` capability. The kernel reads ahead only
+The media service mounts none of EiN's folders: it reaches the files of each request through EiN's
+`ems-files` service, at `CFG_EMS_FILES_ADDRESS`, with an sshfs mount, for which its container has
+`/dev/fuse` and the `SYS_ADMIN` capability. `./setup.sh` writes the address: EiN's name on the
+compose network, or, when EiN has a network of its own under rootless podman, this machine's address
+(`host.containers.internal`), where it publishes `CFG_EMS_FILES_PORT` (2224) on `EIN_BIND`. A media
+service on another machine is `CFG_EMS_FILES_ADDRESS` in `.env`, the `host:port` it reaches this
+machine at, and `./setup.sh` publishes the port for it. The kernel reads ahead only
 128 KiB on such a mount; on the machine the media service runs on, a udev rule raises it for every
 new one, a moment after the mount, when the setting holds:
 

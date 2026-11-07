@@ -558,8 +558,20 @@ port_taken() {
 # from there too under slirp4netns, so EiN believes its forwarding headers (TRUSTED_PROXIES), and
 # those of any proxy .env names in TRUSTED_PROXIES.
 write_override() {
-  local service option lines env devices written=0 reached=() hosts=() forwards=()
+  local service option lines env devices written=0 reached=() hosts=() forwards=() files_address files_published=
   local -A port_in=([db]=5432 [ems]=8181 [llm]=8190)
+  # The media service reaches the files of its requests at EiN's ems-files port: by EiN's name on
+  # the compose network, or, with EiN on a network of its own, at this machine's address, where the
+  # port is published. One that .env names, a media service elsewhere, reaches it published too.
+  files_address=${CFG_EMS_FILES_ADDRESS:-}
+  if [ -n "$files_address" ]; then
+    files_published=1
+  elif [ "$EIN_EMS" = 1 ] && [ -n "$ein_network" ]; then
+    files_address=host.containers.internal:${CFG_EMS_FILES_PORT:-2224}
+    files_published=1
+  elif [ "$EIN_EMS" = 1 ]; then
+    files_address=ein:${CFG_EMS_FILES_PORT:-2224}
+  fi
   if [ -n "$ein_network" ]; then
     reached=(db)
     [ "$EIN_EMS" != 1 ] || reached+=(ems)
@@ -583,7 +595,7 @@ write_override() {
           [ "$service" = llm ] || ! built || lines+=("image: $(image_of ems)" "build: { context: src/ems, dockerfile: Containerfile }")
           devices=()
           [ "$EIN_GPU" != 1 ] || devices+=(nvidia.com/gpu=all)
-          # The media service mounts the files of a request it does not share with sshfs (ems-files).
+          # The media service mounts the files of a request with sshfs (ems-files).
           [ "$service" != ems ] || devices+=(/dev/fuse)
           [ ${#devices[@]} = 0 ] || lines+=("devices: [$(IFS=,; echo "${devices[*]}")]")
           ;;
@@ -604,10 +616,9 @@ write_override() {
             [ "$EIN_EMS" != 1 ] || env+=("CFG_EMS_URL: http://ems:$(loopback_port ems)")
             [ "$EIN_LLM" != 1 ] || [ -n "${CFG_LLM_URL:-}" ] || env+=("CFG_LLM_URL: http://llm:$(loopback_port llm)")
           fi
+          [ -z "$files_address" ] || [ -n "${CFG_EMS_FILES_ADDRESS:-}" ] || env+=("CFG_EMS_FILES_ADDRESS: $files_address")
           [ ${#env[@]} = 0 ] || lines+=("environment:" "${env[@]/#/  }")
-          # A media service without EiN's folders reaches the files of its requests on the
-          # ems-files port, which is published only while .env names the address it is reached at.
-          [ -z "${CFG_EMS_FILES_ADDRESS:-}" ] ||
+          [ -z "$files_published" ] ||
             lines+=("ports: [\"\${EIN_BIND:-0.0.0.0}:\${CFG_EMS_FILES_PORT:-2224}:\${CFG_EMS_FILES_PORT:-2224}\"]")
           ;;
         db) ! built || lines+=("image: $(image_of db)" "build: { context: src/db, dockerfile: Containerfile }") ;;
