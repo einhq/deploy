@@ -43,9 +43,9 @@ services:
 
   # The modules are EiN's to install, into the modules folder under EIN_DATA, which keeps them
   # across updates: the ones EIN_MODULES names (setup.sh --module adds one) at its start when they
-  # are missing, and any other from Settings → Modules. The four data folders: /files the
-  # originals, /old older originals, /files-volatile the renditions, /files-tmp scratch space. `z`
-  # labels them shared under SELinux and is ignored elsewhere. The media service reaches the files
+  # are missing, and any other from Settings → Modules. The three data folders: /files the
+  # originals, /old older originals, /files-volatile the renditions. `z` labels them shared
+  # under SELinux and is ignored elsewhere. The media service reaches the files
   # of its requests at the ems-files port, CFG_EMS_FILES_ADDRESS, which setup.sh writes.
   ein:
     # Core's image with its web interface built in, which GitHub publishes for every commit on main.
@@ -66,7 +66,6 @@ services:
       INSTALL_MODULES: ${EIN_MODULES:-}
       FILE_ROOT_PATH: /files
       VOLATILE_FILE_ROOT_PATH: /files-volatile
-      FILE_TMP_PATH: /files-tmp
     mem_limit: ${EIN_MEMORY:-6g}
     memswap_limit: ${EIN_MEMORY:-6g}
     ports:
@@ -77,7 +76,6 @@ services:
       - ${EIN_DATA}/files:/files:z
       - ${EIN_DATA}/old:/old:z
       - ${EIN_DATA}/files-volatile:/files-volatile:z
-      - ${EIN_DATA}/files-tmp:/files-tmp:z
     depends_on:
       db:
         condition: service_healthy

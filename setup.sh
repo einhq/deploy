@@ -125,7 +125,7 @@ main() {
   build
 
   step "Starting EiN"
-  mkdir -p "$EIN_DATA"/{files,old,files-volatile,files-tmp,llm,modules}
+  mkdir -p "$EIN_DATA"/{files,old,files-volatile,llm,modules}
   prepare_db_dir
   free_ports
   # A network podman made before it could give names keeps without them: down takes it away with
