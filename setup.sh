@@ -86,17 +86,15 @@ main() {
     [ "$options" = 0 ] || fail "--only updates what is installed: give the other options without it"
     [ -f .env ] || fail "--only updates an installation: run ./setup.sh first"
     load_env
-    # podman-compose 1.0 hashes the whole project's config: after a change to the override, starting
-    # one service makes every container again, with that one's swap limit, which the database's
-    # start refuses. Then every service starts again, each on its own (start).
-    local override
-    override=$(cat compose.override.yaml 2>/dev/null || true)
+    # podman-compose 1.0 hashes the whole project's config: after a change to any compose file,
+    # starting one service makes every container again, with that one's swap limit, which the
+    # database's start refuses. Then every service starts again, each on its own (start).
     write_override
-    if [ "$compose_tool" != podman-compose ] || [ "$(cat compose.override.yaml)" = "$override" ]; then
+    if [ "$compose_tool" != podman-compose ] || [ "$(config_hash)" = "$(running_hash)" ]; then
       update_one "$only"
       return
     fi
-    echo "compose.override.yaml changed, so every service is updated and started again, not $only alone"
+    echo "The compose files changed, so every service is updated and started again, not $only alone"
   fi
 
   [ -f .env ] || write_env
@@ -295,6 +293,17 @@ has_dnsname() {
 }
 
 compose() { "$engine" compose -p ein "$@"; }
+
+# The config hash podman-compose labels the containers it makes with, for the compose files as they
+# are now, from a dry run; and the one the running containers were made from.
+config_hash() {
+  compose --dry-run up -d --no-deps db 2>&1 | grep -o 'io.podman.compose.config-hash=[0-9a-f]*' | head -1 | cut -d= -f2
+}
+running_hash() {
+  local id
+  id=$("$engine" ps -aq --filter label=com.docker.compose.project=ein | head -1)
+  [ -z "$id" ] || "$engine" inspect -f '{{index .Config.Labels "io.podman.compose.config-hash"}}' "$id"
+}
 
 # The settings, with passwords made here: nothing else keeps them, so this file is the one to back up.
 write_env() {
