@@ -25,8 +25,10 @@ services:
       POSTGRES_USER: ein
       POSTGRES_DB: ein
       POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?run setup.sh, which writes .env}
-    # TimescaleDB must be preloaded; pg_stat_statements is, so a profiling session can create it.
-    command: [-c, ssl=off, -c, 'shared_preload_libraries=timescaledb,pg_stat_statements']
+    # TimescaleDB must be preloaded; pg_stat_statements is, so a profiling session can create it;
+    # pg_prewarm is, so a restart reads back what was in the cache before it: a search's first
+    # vector lookup after a cold start reads its index from disk (ein/core#1077).
+    command: [-c, ssl=off, -c, 'shared_preload_libraries=timescaledb,pg_stat_statements,pg_prewarm']
     # Parallel queries exchange rows through shared memory; the 64 MB default fails them under load.
     shm_size: 1g
     # The folder EIN_DB_DIR names, db under EIN_DATA unless setup.sh --db-dir moved it, which
