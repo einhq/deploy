@@ -7,25 +7,28 @@ EiN on one Linux machine with podman or Docker and their compose. The installer 
 curl -fsSL https://einhq.eu/install.sh | bash
 ```
 
-What is installed is EiN and its database. The media service, the assistant's language model and
-the modules are added to it with options, at the first install or any time after:
+What is installed is EiN and its database. The media service, the assistant's language model, an
+MQTT broker and the modules are added to it with options, at the first install or any time after:
 
 ```bash
 ./setup.sh --ems              # the media service: every media tool and model, an image of about 30 GB
 ./setup.sh --llm              # the assistant's language model, Qwen3.5-4B in llama.cpp
+./setup.sh --mqtt             # an MQTT broker (Mosquitto) for the Automation module's devices, on port 1883
 ./setup.sh --module archive   # a module, which EiN installs at its start with the modules it needs (archive needs ems)
 ./setup.sh                    # update: this folder and the newest images, pulled and restarted
-./setup.sh --only ein         # update one service, ein, ems, db or llm, and restart only it
+./setup.sh --only ein         # update one service, ein, ems, db, llm or mqtt, and restart only it
 ```
 
 The installer passes the same options on: `curl … | bash -s -- --ems --module archive`. An option
-chosen once is kept in `.env`; `--no-ems` and `--no-llm` leave one out again, and its data stays.
+chosen once is kept in `.env`; `--no-ems`, `--no-llm` and `--no-mqtt` leave one out again, and its
+data stays.
 `./setup.sh --help` lists everything.
 
 ```
 compose.yaml          EiN and PostgreSQL: the base every install runs
 compose.ems.yaml      the media service, which --ems adds
 compose.llm.yaml      the language model, which --llm adds
+compose.mqtt.yaml     the MQTT broker, which --mqtt adds, with its settings in mqtt/
 setup.sh              updates this folder, writes .env and compose.override.yaml, pulls or builds the images, starts
 
 src/                  the sources setup.sh fetches: ems and llm with their options, and core and db from your own
@@ -174,6 +177,12 @@ new one, a moment after the mount, when the setting holds:
 echo 'ACTION=="add", SUBSYSTEM=="bdi", KERNEL=="0:*", RUN+="/bin/sh -c '\''sleep 1; echo 4096 > /sys/class/bdi/%k/read_ahead_kb'\''"' | sudo tee /etc/udev/rules.d/90-fuse-readahead.rules
 sudo udevadm control --reload
 ```
+
+With `--mqtt`, the broker takes no anonymous clients. EiN signs in as `ein` and the devices as
+`device`, with the passwords `MQTT_EIN_PASSWORD` and `MQTT_DEVICE_PASSWORD` that `./setup.sh` made in
+`.env`; give a device the broker's address (this machine, port `MQTT_PORT`, 1883), the user `device`
+and that password. Changing a password there takes effect at the next `./setup.sh`. The broker is
+plain MQTT on your network, without TLS: keep port 1883 off the internet.
 
 ## The graphics card
 

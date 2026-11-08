@@ -6,9 +6,10 @@
 #   ./setup.sh                    EiN and its database; run again, the newest sources of what is here
 #   ./setup.sh --ems              also the media service: every media tool and model, about 30 GB
 #   ./setup.sh --llm              also the assistant's language model
+#   ./setup.sh --mqtt             also an MQTT broker, which the Automation module's devices talk to
 #   ./setup.sh --module archive   also a module, which EiN installs at its start with the modules it needs
-#   ./setup.sh --no-ems --no-llm  leave an option out again; its data stays
-#   ./setup.sh --only ein         update one service, ein, ems, db or llm, and restart only it
+#   ./setup.sh --no-ems --no-llm  leave an option out again (--no-mqtt too); its data stays
+#   ./setup.sh --only ein         update one service, ein, ems, db, llm or mqtt, and restart only it
 #   ./setup.sh --source URL       fetch the sources and the modules from this organisation instead
 #   ./setup.sh --db-dir DIR       keep the database in this folder instead of db under EIN_DATA
 #
@@ -39,13 +40,15 @@ here=$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)
 cd "$here"
 
 main() {
-  local args=("$@") want_ems= want_llm= modules=() source= db_dir= only= key=${EIN_SOURCE_KEY:-} options=0
+  local args=("$@") want_ems= want_llm= want_mqtt= modules=() source= db_dir= only= key=${EIN_SOURCE_KEY:-} options=0
   while [ $# -gt 0 ]; do
     case $1 in
       --ems) want_ems=1 ;;
       --no-ems) want_ems=0 ;;
       --llm) want_llm=1 ;;
       --no-llm) want_llm=0 ;;
+      --mqtt) want_mqtt=1 ;;
+      --no-mqtt) want_mqtt=0 ;;
       --module)
         [ $# -ge 2 ] || fail "--module needs a name, such as archive"
         modules+=("$2")
@@ -64,7 +67,7 @@ main() {
         shift
         ;;
       --only)
-        [ $# -ge 2 ] || fail "--only needs a service: ein, ems, db or llm"
+        [ $# -ge 2 ] || fail "--only needs a service: ein, ems, db, llm or mqtt"
         only=$2
         shift 2
         continue
@@ -100,12 +103,14 @@ main() {
   [ -f .env ] || write_env
   [ -z "$want_ems" ] || set_env EIN_EMS "$want_ems"
   [ -z "$want_llm" ] || set_env EIN_LLM "$want_llm"
+  [ -z "$want_mqtt" ] || set_env EIN_MQTT "$want_mqtt"
   [ ${#modules[@]} = 0 ] || add_modules "${modules[@]}"
   [ -z "$source" ] || set_source "$source"
   [ -z "$key" ] || set_env EIN_SOURCE_KEY "$key"
   [ -z "$db_dir" ] || set_db_dir "$db_dir"
   load_env
   module_sources
+  [ "$EIN_MQTT" != 1 ] || mqtt_accounts
   write_override
 
   # The media service's source comes with its image too: its deploy/ has the fix for the card's CDI
@@ -137,7 +142,7 @@ main() {
   # one by one (start).
   if [ "$compose_tool" = podman-compose ]; then
     compose down --remove-orphans
-    start db ein ems llm
+    start db mqtt ein ems llm
   else
     local recreate=()
     [ -z "$("$engine" ps -aq --filter label=com.docker.compose.project=ein)" ] || recreate=(--force-recreate)
@@ -161,7 +166,11 @@ update_one() {
       [ "${!option}" = 1 ] || fail "$1 is not installed here: ./setup.sh --$1 adds it"
       fetch "$1" "src/$1"
       ;;
-    *) fail "--only takes ein, ems, db or llm, not $1" ;;
+    mqtt)
+      [ "$EIN_MQTT" = 1 ] || fail "mqtt is not installed here: ./setup.sh --mqtt adds it"
+      mqtt_accounts
+      ;;
+    *) fail "--only takes ein, ems, db, llm or mqtt, not $1" ;;
   esac
   step "Getting $1's image"
   local old
@@ -198,9 +207,9 @@ recreate() {
 # through a restart; a plain `podman compose up -d` that creates a container leaves it out.
 start() {
   local service mem
-  for service in db ein ems llm; do
+  for service in db mqtt ein ems llm; do
     [[ " $* " == *" $service "* ]] || continue
-    case $service in ems | llm) local option=EIN_${service^^}; [ "${!option}" = 1 ] || continue ;; esac
+    case $service in ems | llm | mqtt) local option=EIN_${service^^}; [ "${!option}" = 1 ] || continue ;; esac
     # The dry run writes its commands to stderr, the services this one needs too: 1.0 ignores --no-deps.
     mem=$(compose --dry-run up -d --no-deps "$service" 2>&1 |
       sed -n "/^podman run .* --label com.docker.compose.service=$service /s/.* -m \([^ ]*\) .*/\1/p" | tail -1)
@@ -276,10 +285,10 @@ pick_ein_network() {
   fi
 }
 
-# The loopback ports EiN reaches the database, the media service and the model on, when it has a
+# The loopback ports EiN reaches the database, the media service, the model and the broker on, when it has a
 # network of its own (pick_ein_network): each published on 127.0.0.1 alone, and moved to the next
 # free one like EiN's own ports.
-declare -A loopback_ports=([EIN_DB_PORT]=15432 [EIN_EMS_PORT]=18181 [EIN_LLM_PORT]=18190)
+declare -A loopback_ports=([EIN_DB_PORT]=15432 [EIN_EMS_PORT]=18181 [EIN_LLM_PORT]=18190 [EIN_MQTT_PORT]=11883)
 
 # A service's loopback port as compose reads it in compose.override.yaml: from .env, or the default.
 loopback_port() { echo "\${EIN_${1^^}_PORT:-${loopback_ports[EIN_${1^^}_PORT]}}"; }
@@ -337,6 +346,13 @@ EIN_ENGINE=$engine
 EIN_EMS=0
 EIN_LLM=0
 EIN_GPU=$gpu
+
+# The MQTT broker, with setup.sh --mqtt: the port the devices on this network reach it on, of
+# EIN_BIND, and the passwords EiN (`ein`) and the devices (`device`) sign in with.
+EIN_MQTT=0
+MQTT_PORT=1883
+MQTT_EIN_PASSWORD=$(secret)
+MQTT_DEVICE_PASSWORD=$(secret 12)
 
 # The modules EiN installs at its start when it lacks them, with the modules they need, into the
 # modules folder under EIN_DATA; setup.sh --module adds one. Settings → Modules lists the published
@@ -403,10 +419,25 @@ set_env() {
 }
 unset_env() { sed -i "/^$1=/d" .env; }
 
-# .env as this script's variables.
+# .env as this script's variables, with the options an older .env does not name.
 load_env() {
   # shellcheck disable=SC1091
   set -a && . ./.env && set +a
+  : "${EIN_MQTT:=0}"
+}
+
+# The broker's two accounts: their passwords kept in .env, made the first time, and written hashed
+# into EIN_DATA/mqtt/passwords, the broker's data folder, by the broker's own image as its root: the
+# file is the broker's user's after its first start. The passwords go in on standard input, never
+# on a command line.
+mqtt_accounts() {
+  [ -n "${MQTT_EIN_PASSWORD:-}" ] || { MQTT_EIN_PASSWORD=$(secret); set_env MQTT_EIN_PASSWORD "$MQTT_EIN_PASSWORD"; }
+  [ -n "${MQTT_DEVICE_PASSWORD:-}" ] || { MQTT_DEVICE_PASSWORD=$(secret 12); set_env MQTT_DEVICE_PASSWORD "$MQTT_DEVICE_PASSWORD"; }
+  [ -n "${MQTT_PORT:-}" ] || { MQTT_PORT=1883; set_env MQTT_PORT "$MQTT_PORT"; }
+  mkdir -p "$EIN_DATA/mqtt"
+  printf 'ein:%s\ndevice:%s\n' "$MQTT_EIN_PASSWORD" "$MQTT_DEVICE_PASSWORD" |
+    "$engine" run --rm -i --user 0 --entrypoint sh -v "$EIN_DATA/mqtt:/work:z" "${MQTT_IMAGE:-docker.io/library/eclipse-mosquitto:2}" -c \
+      'cat >/work/passwords && mosquitto_passwd -U /work/passwords && chown 1883:1883 /work/passwords && chmod 600 /work/passwords'
 }
 
 # One run in this folder at a time: this script runs again under flock, which holds a lock on the
@@ -543,6 +574,7 @@ check_db_mount() {
 # of its own, the loopback ports too.
 free_ports() {
   local name port was ours names=(EIN_HTTP_PORT EIN_SSH_PORT)
+  [ "$EIN_MQTT" != 1 ] || names+=(MQTT_PORT)
   [ -z "$ein_network" ] || names+=("${!loopback_ports[@]}")
   ours=$("$engine" ps --filter label=com.docker.compose.project=ein --format '{{.Ports}}')
   for name in "${names[@]}"; do
@@ -578,7 +610,7 @@ port_taken() {
 # those of any proxy .env names in TRUSTED_PROXIES.
 write_override() {
   local service option lines env devices written=0 reached=() hosts=() forwards=() files_address files_published=
-  local -A port_in=([db]=5432 [ems]=8181 [llm]=8190)
+  local -A port_in=([db]=5432 [ems]=8181 [llm]=8190 [mqtt]=1883)
   # The media service reaches the files of its requests at EiN's ems-files port: by EiN's name on
   # the compose network, or, with EiN on a network of its own, at this machine's address, where the
   # port is published. One that .env names, a media service elsewhere, reaches it published too.
@@ -595,6 +627,7 @@ write_override() {
     reached=(db)
     [ "$EIN_EMS" != 1 ] || reached+=(ems)
     [ "$EIN_LLM" != 1 ] || reached+=(llm)
+    [ "$EIN_MQTT" != 1 ] || reached+=(mqtt)
     for service in "${reached[@]}"; do
       hosts+=("\"$service:$([ "$ein_network" = pasta ] && echo 127.0.0.1 || echo 10.0.2.2)\"")
       forwards+=("-T,$(loopback_port "$service")")
@@ -604,9 +637,13 @@ write_override() {
     echo "# Written by setup.sh from the options in .env and the container engine; edit those and run"
     echo "# setup.sh again."
     echo "services:"
-    for service in db ein ems llm; do
+    for service in db mqtt ein ems llm; do
       lines=()
       case $service in
+        mqtt)
+          [ "$EIN_MQTT" = 1 ] || continue
+          lines+=("extends: { file: compose.mqtt.yaml, service: mqtt }")
+          ;;
         ems | llm)
           option=EIN_${service^^}
           [ "${!option}" = 1 ] || continue
@@ -634,6 +671,10 @@ write_override() {
             env+=("POSTGRES_URL: postgres://ein:\${POSTGRES_PASSWORD}@db:$(loopback_port db)/ein")
             [ "$EIN_EMS" != 1 ] || env+=("CFG_EMS_URL: http://ems:$(loopback_port ems)")
             [ "$EIN_LLM" != 1 ] || [ -n "${CFG_LLM_URL:-}" ] || env+=("CFG_LLM_URL: http://llm:$(loopback_port llm)")
+          fi
+          if [ "$EIN_MQTT" = 1 ] && [ -z "${CFG_AUTOMATION_MQTT_URL:-}" ]; then
+            env+=("CFG_AUTOMATION_MQTT_URL: mqtt://mqtt:$([ -n "$ein_network" ] && loopback_port mqtt || echo 1883)")
+            env+=("CFG_AUTOMATION_MQTT_USER: ein" "CFG_AUTOMATION_MQTT_KEY: \${MQTT_EIN_PASSWORD}")
           fi
           [ -z "$files_address" ] || [ -n "${CFG_EMS_FILES_ADDRESS:-}" ] || env+=("CFG_EMS_FILES_ADDRESS: $files_address")
           [ ${#env[@]} = 0 ] || lines+=("environment:" "${env[@]/#/  }")

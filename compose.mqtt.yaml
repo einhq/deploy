@@ -1,0 +1,16 @@
+# The MQTT broker module-automation's devices talk to, as an option: setup.sh --mqtt names it in
+# compose.override.yaml. Mosquitto, with no anonymous clients: EiN signs in as `ein` and the devices
+# as `device`, with MQTT_EIN_PASSWORD and MQTT_DEVICE_PASSWORD from .env, which setup.sh hashes into
+# EIN_DATA/mqtt/passwords. The devices on this machine's network reach it on MQTT_PORT of EIN_BIND;
+# it keeps retained messages, such as the devices' announcements, in EIN_DATA/mqtt across restarts.
+services:
+  mqtt:
+    image: ${MQTT_IMAGE:-docker.io/library/eclipse-mosquitto:2}
+    restart: unless-stopped
+    mem_limit: 256m
+    memswap_limit: 256m
+    volumes:
+      - ./mqtt/mosquitto.conf:/mosquitto/config/mosquitto.conf:ro,z
+      - ${EIN_DATA}/mqtt:/mosquitto/data:z
+    ports:
+      - '${EIN_BIND:-0.0.0.0}:${MQTT_PORT:-1883}:1883'
