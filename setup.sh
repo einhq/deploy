@@ -40,7 +40,7 @@ here=$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)
 cd "$here"
 
 main() {
-  local args=("$@") want_ems= want_llm= want_mqtt= modules=() source= db_dir= only= key=${EIN_SOURCE_KEY:-} options=0
+  local args=("$@") want_ems= want_llm= want_mqtt= modules=() source= db_dir= only= key=${EIN_SOURCE_KEY:-} options=0 unknown=
   while [ $# -gt 0 ]; do
     case $1 in
       --ems) want_ems=1 ;;
@@ -76,7 +76,8 @@ main() {
         sed -n '2,/^set -euo/p' "$0" | sed '$d; s/^# \{0,1\}//'
         return
         ;;
-      *) fail "unknown option $1 (--help lists them)" ;;
+      # Refused once this folder is up to date: the newer setup.sh may know it.
+      *) unknown=${unknown:-$1} ;;
     esac
     options=$((options + 1))
     shift
@@ -84,6 +85,7 @@ main() {
 
   one_at_a_time "${args[@]}"
   update_self "$source" "${args[@]}"
+  [ -z "$unknown" ] || fail "unknown option $unknown (--help lists them)"
   pick_engine
   if [ -n "$only" ]; then
     [ "$options" = 0 ] || fail "--only updates what is installed: give the other options without it"
