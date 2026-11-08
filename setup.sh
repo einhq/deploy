@@ -720,10 +720,44 @@ build() {
     esac
     [ "$service" = db ] || cached+=("$service")
   done
-  [ ${#cached[@]} = 0 ] || compose build "${cached[@]}"
+  [ ${#cached[@]} = 0 ] || build_images "${cached[@]}"
   # The database's PostgreSQL and extensions come at the newest release their apt repositories have,
   # which a cached layer would keep from the build that made it.
-  [ ${#cached[@]} = ${#services[@]} ] || compose build --no-cache db
+  [ ${#cached[@]} = ${#services[@]} ] || build_images --no-cache db
+}
+
+# The services' images built, tried twice: a download a build needs, such as the guide's archive
+# from GitHub, fails now and then. A build that fails twice stops the update, and the containers
+# keep running on the images they have.
+build_images() {
+  local try
+  for try in 1 2; do
+    if [ "$compose_tool" = podman-compose ]; then podman_compose_build "$@" && return; else compose build "$@" && return; fi
+    [ "$try" = 2 ] || echo "The build failed; it is tried once more"
+  done
+  fail "the images did not build, so EiN runs on as it was; the build's output is above"
+}
+
+# podman-compose 1.0 goes on past a build that fails and exits 0, the old image keeping the name.
+# So the name is taken off the old image first: a build that leaves no image under it failed, and
+# the old image gets its name back.
+podman_compose_build() {
+  local arg service image failed=0
+  local -A old=()
+  for arg in "$@"; do
+    [[ $arg == -* ]] && continue
+    image=$(image_of "$arg")
+    old[$arg]=$(podman image inspect --format '{{.Id}}' "$image" 2>/dev/null || true)
+    [ -z "${old[$arg]}" ] || podman untag "${old[$arg]}" "$image"
+  done
+  compose build "$@" || failed=1
+  for service in "${!old[@]}"; do
+    image=$(image_of "$service")
+    podman image exists "$image" && continue
+    failed=1
+    [ -z "${old[$service]}" ] || podman tag "${old[$service]}" "$image"
+  done
+  [ "$failed" = 0 ]
 }
 
 # The ids of the images build tags or pull.
