@@ -179,9 +179,9 @@ update_one() {
   old=$(built_images)
   build "$1"
   [ "$1" != db ] || prepare_db_dir
-  # EiN goes and comes back with the database: podman keeps a container that another requires.
-  # The network listener goes with the broker it publishes on.
-  if [ "$1" = db ]; then recreate ein db; elif [ "$1" = mqtt ]; then recreate mqtt discovery; else recreate "$1"; fi
+  # EiN goes and comes back with the database, the network listener with the broker it publishes
+  # on: podman keeps a container that another requires, so the one that requires it goes first.
+  if [ "$1" = db ]; then recreate ein db; elif [ "$1" = mqtt ]; then recreate discovery mqtt; else recreate "$1"; fi
   case $1 in
     db) check_db_mount && wait_for_ein ;;
     ein) wait_for_ein ;;
