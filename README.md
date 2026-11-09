@@ -185,7 +185,8 @@ and that password. Changing a password there takes effect at the next `./setup.s
 plain MQTT on your network, without TLS: keep port 1883 off the internet.
 
 `--mqtt` also runs `discovery` beside the broker, on this machine's own network: every two minutes
-it asks what is there over mDNS and SSDP and publishes the answers on the broker, where the
+it asks what is there over mDNS and SSDP, hears mDNS announcements in between on port 5353 beside
+any responder already there such as Avahi, and publishes the answers on the broker, where the
 Automation module names them and offers the ones it can take as devices (Devices → _found_). A
 Shelly is added from there: EiN gives it the broker's address and the `device` account itself. It
 sends multicast on the network this machine is on, and nothing leaves it.

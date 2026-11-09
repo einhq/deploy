@@ -6,9 +6,10 @@
  * It runs on the host's network, since the multicast it asks with stays on the network it is sent
  * on. Every round (DISCOVERY_INTERVAL seconds, 120 by default) it asks:
  *
- * - mDNS: which service types there are (`_services._dns-sd._udp.local`), then who offers each, from
- *   a port of its own, so responders answer it directly (RFC 6762 §6.7) and a responder already on
- *   5353, such as Avahi, is left alone;
+ * - mDNS: which service types there are (`_services._dns-sd._udp.local`), then who offers each. It
+ *   asks from 5353 and hears there all the time, beside a responder already on it such as Avahi, in
+ *   224.0.0.251 on every interface: minimal responders (Shelly's first generation) answer only a
+ *   question from 5353, and only to the group. What is announced between rounds counts for the next;
  * - SSDP: `M-SEARCH ssdp:all`, then the description each answer points at, once per address;
  * - the host's ARP table, for the hardware address of each IP that answered.
  *
@@ -144,6 +145,8 @@ const txtOf = (data: Uint8Array): Record<string, string> => {
 
 type Datagram = { data: Uint8Array; ip: string };
 
+const sleep = (ms: number) => new Promise((resolve) => setTimeout(resolve, ms));
+
 /** Sends `payload` to a multicast group from a port of its own and returns what comes back within LISTEN_MS. */
 const ask = async (group: string, port: number, payload: Uint8Array): Promise<Datagram[]> => {
   const socket = Deno.listenDatagram({ transport: 'udp', hostname: '0.0.0.0', port: 0 });
@@ -163,48 +166,104 @@ const ask = async (group: string, port: number, payload: Uint8Array): Promise<Da
   return answers;
 };
 
-// ---- one round ----
+// ---- what is heard ----
 
 type Heard = Map<string, { names: Set<string>; mdns: Map<string, MdnsService>; ssdp: Map<string, SsdpService> }>;
 
-const heardAt = (heard: Heard, ip: string) => {
+/** What answered since the last round, by address. */
+let heard: Heard = new Map();
+/** The service types named since the last round, to ask who offers each. */
+let types = new Set<string>();
+
+const heardAt = (ip: string) => {
   let host = heard.get(ip);
   if (!host) heard.set(ip, host = { names: new Set(), mdns: new Map(), ssdp: new Map() });
   return host;
 };
 
-/** What answered mDNS, by address: which service types there are, then each type's instances. */
-const askMdns = async (heard: Heard): Promise<void> => {
-  const types = new Set<string>();
-  for (const answer of await ask('224.0.0.251', 5353, query([SERVICES]))) {
-    for (const record of parseResponse(answer.data)) {
-      if (record.type === TYPE.PTR && record.name === SERVICES) types.add(readName(record.message, record.offset)[0]);
+// ---- mDNS ----
+
+const MDNS_GROUP = '224.0.0.251';
+const MDNS_PORT = 5353;
+/** A service instance's name, `<instance>._<service>._tcp.local`, split in its instance and type. */
+const INSTANCE = /^(.+)\.(_[^.]+\._(?:tcp|udp))\.local$/;
+
+/** What one mDNS response from `ip` says: the service types there are, and the services, names of `ip`. */
+const hearMdns = (data: Uint8Array, ip: string): void => {
+  const records = parseResponse(data);
+  if (!records.length) return;
+  const host = heardAt(ip);
+  // An instance's PTR, SRV and TXT may come in different messages, an announcement's too, so each
+  // is kept by the instance it names.
+  const instance = (full: string): MdnsService | undefined => {
+    const parts = full.match(INSTANCE);
+    if (!parts) return undefined;
+    let service = host.mdns.get(full);
+    if (!service) host.mdns.set(full, service = { type: parts[2], instance: parts[1], txt: {} });
+    return service;
+  };
+  for (const record of records) {
+    if (record.type === TYPE.PTR && record.name === SERVICES) {
+      types.add(readName(record.message, record.offset)[0]);
+    } else if (record.type === TYPE.PTR) {
+      instance(readName(record.message, record.offset)[0]);
+    } else if (record.type === TYPE.SRV) {
+      const service = instance(record.name);
+      if (!service) continue;
+      service.port = (record.data[4] << 8) | record.data[5];
+      host.names.add(readName(record.message, record.offset + 6)[0]);
+    } else if (record.type === TYPE.TXT) {
+      const service = instance(record.name);
+      if (service) service.txt = txtOf(record.data);
+    } else if (record.type === TYPE.A && record.name.endsWith('.local')) {
+      host.names.add(record.name);
     }
   }
-  if (!types.size) return;
-  for (const answer of await ask('224.0.0.251', 5353, query([...types]))) {
-    const records = parseResponse(answer.data);
-    const host = heardAt(heard, answer.ip);
-    const instances = new Map<string, MdnsService>();
-    for (const record of records) {
-      if (record.type !== TYPE.PTR || !types.has(record.name)) continue;
-      const full = readName(record.message, record.offset)[0];
-      const instance = full.endsWith(`.${record.name}`) ? full.slice(0, -record.name.length - 1) : full;
-      instances.set(full, { type: record.name.replace(/\.local$/, ''), instance, txt: {} });
+};
+
+/**
+ * The socket mDNS is asked and heard on: 5353, beside a responder already there, in the group on
+ * every interface. Where 5353 cannot be shared it is a port of its own, which hears only the
+ * responders that answer it directly.
+ */
+const listenMdns = async (): Promise<Deno.DatagramConn> => {
+  let socket: Deno.DatagramConn;
+  try {
+    socket = Deno.listenDatagram({ transport: 'udp', hostname: '0.0.0.0', port: MDNS_PORT, reuseAddress: true });
+    for (const each of Deno.networkInterfaces()) {
+      if (each.family !== 'IPv4' || each.address.startsWith('127.')) continue;
+      // A second address on an interface already in the group is refused; the first one serves.
+      await socket.joinMulticastV4(MDNS_GROUP, each.address).catch(() => {});
     }
-    for (const record of records) {
-      const service = instances.get(record.name);
-      if (service && record.type === TYPE.SRV) {
-        service.port = (record.data[4] << 8) | record.data[5];
-        host.names.add(readName(record.message, record.offset + 6)[0]);
-      } else if (service && record.type === TYPE.TXT) {
-        service.txt = txtOf(record.data);
-      } else if (record.type === TYPE.A && record.name.endsWith('.local')) {
-        host.names.add(record.name);
+  } catch (error) {
+    log(`mDNS on ${MDNS_PORT}: ${message(error)}; asking from a port of its own`);
+    socket = Deno.listenDatagram({ transport: 'udp', hostname: '0.0.0.0', port: 0 });
+  }
+  (async () => {
+    try {
+      for await (const [data, from] of socket) {
+        try {
+          hearMdns(data, (from as Deno.NetAddr).hostname);
+        } catch { /* a message that does not parse */ }
       }
+    } catch (error) {
+      if (error instanceof Deno.errors.BadResource) return;
+      log(`hearing mDNS: ${message(error)}`);
+      Deno.exit(1);
     }
-    for (const [full, service] of instances) host.mdns.set(full, service);
-  }
+  })();
+  return socket;
+};
+
+/** Which service types there are, then who offers each; the answers come in on the socket. */
+const askMdns = async (socket: Deno.DatagramConn): Promise<void> => {
+  const to = { transport: 'udp', hostname: MDNS_GROUP, port: MDNS_PORT } as const;
+  await socket.send(query([SERVICES]), to);
+  await sleep(LISTEN_MS);
+  for (const host of heard.values()) for (const service of host.mdns.values()) types.add(`${service.type}.local`);
+  if (!types.size) return;
+  await socket.send(query([...types]), to);
+  await sleep(LISTEN_MS);
 };
 
 const header = (text: string, name: string): string | undefined => text.match(new RegExp(`^${name}:\\s*(.*?)\\s*$`, 'im'))?.[1];
@@ -214,7 +273,7 @@ const element = (xml: string, name: string): string | undefined => {
 };
 
 /** What answered SSDP, by address, with what each one's description says of the device. */
-const askSsdp = async (heard: Heard): Promise<void> => {
+const askSsdp = async (): Promise<void> => {
   const search = 'M-SEARCH * HTTP/1.1\r\nHOST: 239.255.255.250:1900\r\nMAN: "ssdp:discover"\r\nMX: 2\r\nST: ssdp:all\r\n\r\n';
   const described = new Map<string, Promise<string | undefined>>();
   const describe = (location: string) => {
@@ -246,7 +305,7 @@ const askSsdp = async (heard: Heard): Promise<void> => {
         service.udn = element(xml, 'UDN');
       }
     }
-    heardAt(heard, answer.ip).ssdp.set(`${st} ${usn ?? ''}`, service);
+    heardAt(answer.ip).ssdp.set(`${st} ${usn ?? ''}`, service);
   }));
 };
 
@@ -269,13 +328,15 @@ const arpTable = async (): Promise<Map<string, string>> => {
   return table;
 };
 
-const round = async (): Promise<Host[]> => {
-  const heard: Heard = new Map();
-  const results = await Promise.allSettled([askMdns(heard), askSsdp(heard)]);
+const round = async (mdns: Deno.DatagramConn): Promise<Host[]> => {
+  const results = await Promise.allSettled([askMdns(mdns), askSsdp()]);
   for (const result of results) if (result.status === 'rejected') log(`asking: ${message(result.reason)}`);
+  const answered = heard;
+  heard = new Map();
+  types = new Set();
   const arp = await arpTable();
   const seen = new Date().toISOString();
-  return [...heard].filter(([, host]) => host.mdns.size || host.ssdp.size).map(([ip, host]) => ({
+  return [...answered].filter(([, host]) => host.mdns.size || host.ssdp.size).map(([ip, host]) => ({
     ip,
     ...(arp.get(ip) ? { mac: arp.get(ip) } : {}),
     names: [...host.names].sort(),
@@ -355,12 +416,12 @@ const idOf = (host: Host): string => host.mac ? host.mac.replace(/:/g, '') : hos
 /** When each id was last heard, so one unheard for FORGET_MS is cleared. */
 const lastHeard = new Map<string, number>();
 
-const run = async () => {
+const run = async (mdns: Deno.DatagramConn) => {
   log(`publishing to ${MQTT_HOST}:${MQTT_PORT} under ${PREFIX}, every ${INTERVAL_MS / 1000} s`);
   for (;;) {
     const started = Date.now();
     try {
-      const hosts = await round();
+      const hosts = await round(mdns);
       const messages = hosts.map((host) => ({ topic: `${PREFIX}/host/${idOf(host)}`, payload: JSON.stringify(host) }));
       for (const host of hosts) lastHeard.set(idOf(host), started);
       for (const [id, at] of lastHeard) {
@@ -375,11 +436,14 @@ const run = async () => {
     } catch (error) {
       log(message(error));
     }
-    await new Promise((resolve) => setTimeout(resolve, Math.max(1000, INTERVAL_MS - (Date.now() - started))));
+    await sleep(Math.max(1000, INTERVAL_MS - (Date.now() - started)));
   }
 };
 
 if (import.meta.main) {
-  if (Deno.args[0] === '--once') console.log(JSON.stringify(await round(), null, 2));
-  else await run();
+  const mdns = await listenMdns();
+  if (Deno.args[0] === '--once') {
+    console.log(JSON.stringify(await round(mdns), null, 2));
+    mdns.close();
+  } else await run(mdns);
 }
