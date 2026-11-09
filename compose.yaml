@@ -54,6 +54,8 @@ services:
     # From any source but GitHub's einhq, compose.override.yaml builds it here instead, as
     # localhost/ein-core from src/core.
     image: ghcr.io/einhq/core:main
+    # This machine's name, so EiN's device for it is named after it rather than the container.
+    hostname: ${EIN_HOSTNAME:-ein}
     restart: unless-stopped
     stop_grace_period: 60s
     env_file: .env

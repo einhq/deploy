@@ -341,6 +341,10 @@ write_env() {
 # The compose project's name, which names its containers, network and volumes.
 COMPOSE_PROJECT_NAME=ein
 
+# This machine's name, which EiN's container takes: EiN shows this machine as the device of that
+# name, with its CPU, memory, disks and temperatures.
+EIN_HOSTNAME=$(machine_name)
+
 # The container engine, podman or docker, which setup.sh picked at the install and keeps to: under
 # the other one EiN would be a second, empty one.
 EIN_ENGINE=$engine
@@ -423,12 +427,17 @@ set_env() {
 }
 unset_env() { sed -i "/^$1=/d" .env; }
 
-# .env as this script's variables, with the options an older .env does not name.
+# .env as this script's variables, with the options an older .env does not name; this machine's
+# name is written into it.
 load_env() {
   # shellcheck disable=SC1091
   set -a && . ./.env && set +a
   : "${EIN_MQTT:=0}"
+  [ -n "${EIN_HOSTNAME:-}" ] || { EIN_HOSTNAME=$(machine_name); set_env EIN_HOSTNAME "$EIN_HOSTNAME"; export EIN_HOSTNAME; }
 }
+
+# This machine's name without its domain.
+machine_name() { local name; name=$(uname -n); echo "${name%%.*}"; }
 
 # The broker's two accounts: their passwords kept in .env, made the first time, and written hashed
 # into EIN_DATA/mqtt/passwords, the broker's data folder, by the broker's own image as its root: the
