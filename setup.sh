@@ -356,7 +356,7 @@ EIN_LLM=0
 EIN_GPU=$gpu
 
 # The MQTT broker, with setup.sh --mqtt: the port the devices on this network reach it on, of
-# EIN_BIND, and the passwords EiN (`ein`) and the devices (`device`) sign in with.
+# EIN_BIND, and the passwords EiN (\`ein\`) and the devices (\`device\`) sign in with.
 EIN_MQTT=0
 MQTT_PORT=1883
 MQTT_EIN_PASSWORD=$(secret)
