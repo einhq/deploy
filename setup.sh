@@ -144,7 +144,7 @@ main() {
   # one by one (start).
   if [ "$compose_tool" = podman-compose ]; then
     compose down --remove-orphans
-    start db mqtt ein ems llm
+    start db mqtt discovery ein ems llm
   else
     local recreate=()
     [ -z "$("$engine" ps -aq --filter label=com.docker.compose.project=ein)" ] || recreate=(--force-recreate)
@@ -180,7 +180,8 @@ update_one() {
   build "$1"
   [ "$1" != db ] || prepare_db_dir
   # EiN goes and comes back with the database: podman keeps a container that another requires.
-  if [ "$1" = db ]; then recreate ein db; else recreate "$1"; fi
+  # The network listener goes with the broker it publishes on.
+  if [ "$1" = db ]; then recreate ein db; elif [ "$1" = mqtt ]; then recreate mqtt discovery; else recreate "$1"; fi
   case $1 in
     db) check_db_mount && wait_for_ein ;;
     ein) wait_for_ein ;;
@@ -209,9 +210,10 @@ recreate() {
 # through a restart; a plain `podman compose up -d` that creates a container leaves it out.
 start() {
   local service mem
-  for service in db mqtt ein ems llm; do
+  for service in db mqtt discovery ein ems llm; do
     [[ " $* " == *" $service "* ]] || continue
     case $service in ems | llm | mqtt) local option=EIN_${service^^}; [ "${!option}" = 1 ] || continue ;; esac
+    [ "$service" != discovery ] || [ "$EIN_MQTT" = 1 ] || continue
     # The dry run writes its commands to stderr, the services this one needs too: 1.0 ignores --no-deps.
     mem=$(compose --dry-run up -d --no-deps "$service" 2>&1 |
       sed -n "/^podman run .* --label com.docker.compose.service=$service /s/.* -m \([^ ]*\) .*/\1/p" | tail -1)
@@ -639,12 +641,12 @@ write_override() {
     echo "# Written by setup.sh from the options in .env and the container engine; edit those and run"
     echo "# setup.sh again."
     echo "services:"
-    for service in db mqtt ein ems llm; do
+    for service in db mqtt discovery ein ems llm; do
       lines=()
       case $service in
-        mqtt)
+        mqtt | discovery)
           [ "$EIN_MQTT" = 1 ] || continue
-          lines+=("extends: { file: compose.mqtt.yaml, service: mqtt }")
+          lines+=("extends: { file: compose.mqtt.yaml, service: $service }")
           ;;
         ems | llm)
           option=EIN_${service^^}
@@ -677,6 +679,8 @@ write_override() {
           if [ "$EIN_MQTT" = 1 ] && [ -z "${CFG_AUTOMATION_MQTT_URL:-}" ]; then
             env+=("CFG_AUTOMATION_MQTT_URL: mqtt://mqtt:$([ -n "$ein_network" ] && loopback_port mqtt || echo 1883)")
             env+=("CFG_AUTOMATION_MQTT_USER: ein" "CFG_AUTOMATION_MQTT_KEY: \${MQTT_EIN_PASSWORD}")
+            # What a device added from the network signs in with.
+            env+=("CFG_AUTOMATION_DEVICE_USER: device" "CFG_AUTOMATION_DEVICE_KEY: \${MQTT_DEVICE_PASSWORD}")
           fi
           [ -z "$files_address" ] || [ -n "${CFG_EMS_FILES_ADDRESS:-}" ] || env+=("CFG_EMS_FILES_ADDRESS: $files_address")
           [ ${#env[@]} = 0 ] || lines+=("environment:" "${env[@]/#/  }")

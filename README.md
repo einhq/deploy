@@ -28,7 +28,7 @@ data stays.
 compose.yaml          EiN and PostgreSQL: the base every install runs
 compose.ems.yaml      the media service, which --ems adds
 compose.llm.yaml      the language model, which --llm adds
-compose.mqtt.yaml     the MQTT broker, which --mqtt adds, with its settings in mqtt/
+compose.mqtt.yaml     the MQTT broker and the network listener, which --mqtt adds, with their files in mqtt/
 setup.sh              updates this folder, writes .env and compose.override.yaml, pulls or builds the images, starts
 
 src/                  the sources setup.sh fetches: ems and llm with their options, and core and db from your own
@@ -183,6 +183,12 @@ With `--mqtt`, the broker takes no anonymous clients. EiN signs in as `ein` and 
 `.env`; give a device the broker's address (this machine, port `MQTT_PORT`, 1883), the user `device`
 and that password. Changing a password there takes effect at the next `./setup.sh`. The broker is
 plain MQTT on your network, without TLS: keep port 1883 off the internet.
+
+`--mqtt` also runs `discovery` beside the broker, on this machine's own network: every two minutes
+it asks what is there over mDNS and SSDP and publishes the answers on the broker, where the
+Automation module names them and offers the ones it can take as devices (Devices → _found_). A
+Shelly is added from there: EiN gives it the broker's address and the `device` account itself. It
+sends multicast on the network this machine is on, and nothing leaves it.
 
 ## The graphics card
 
