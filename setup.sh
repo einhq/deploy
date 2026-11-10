@@ -746,7 +746,9 @@ port_taken() {
 # The automation sidecar is on this machine's own network, listening on its ports itself. EiN with a
 # network of its own reaches it at this machine's loopback as it reaches the others; on the compose
 # network, at this machine's address there: host.containers.internal under podman, the name
-# automation as host-gateway under Docker.
+# automation as host-gateway under Docker. The media service, always on the compose network, reads
+# the cameras' streams at the sidecar's RTSP the same way, which EiN tells it
+# (CFG_AUTOMATION_STREAMS_RTSP).
 write_override() {
   local service option lines env devices written=0 reached=() hosts=() forwards=() files_address files_published=
   local automation_host=automation
@@ -798,6 +800,7 @@ write_override() {
           [ "${!option}" = 1 ] || continue
           lines+=("extends: { file: compose.$service.yaml, service: $service }")
           [ "$service" = llm ] || ! built || lines+=("image: $(image_of ems)" "build: { context: src/ems, dockerfile: Containerfile }")
+          [ "$service" != ems ] || [ "$EIN_AUTOMATION" != 1 ] || [ "$engine" != docker ] || lines+=("extra_hosts: [\"automation:host-gateway\"]")
           devices=()
           [ "$EIN_GPU" != 1 ] || devices+=(nvidia.com/gpu=all)
           # The media service mounts the files of a request with sshfs (ems-files).
@@ -830,6 +833,9 @@ write_override() {
           if [ "$EIN_AUTOMATION" = 1 ] && [ -z "${CFG_AUTOMATION_STREAMS_URL:-}" ]; then
             env+=("CFG_AUTOMATION_STREAMS_URL: http://$automation_host:\${STREAMS_PORT:-1984}")
             env+=("CFG_AUTOMATION_STREAMS_KEY: \${STREAMS_PASSWORD}")
+          fi
+          if [ "$EIN_AUTOMATION" = 1 ] && [ -z "${CFG_AUTOMATION_STREAMS_RTSP:-}" ]; then
+            env+=("CFG_AUTOMATION_STREAMS_RTSP: rtsp://$([ "$engine" = docker ] && echo automation || echo host.containers.internal):\${RTSP_PORT:-8554}")
           fi
           [ -z "$files_address" ] || [ -n "${CFG_EMS_FILES_ADDRESS:-}" ] || env+=("CFG_EMS_FILES_ADDRESS: $files_address")
           [ ${#env[@]} = 0 ] || lines+=("environment:" "${env[@]/#/  }")
