@@ -6,10 +6,11 @@
 #   ./setup.sh                    EiN and its database; run again, the newest sources of what is here
 #   ./setup.sh --ems              also the media service: every media tool and model, about 30 GB
 #   ./setup.sh --llm              also the assistant's language model
-#   ./setup.sh --mqtt             also an MQTT broker, which the Automation module's devices talk to
+#   ./setup.sh --automation       also the Automation module's sidecar: an MQTT broker for its devices,
+#                                 a listener for devices on the network, a restreamer for cameras
 #   ./setup.sh --module archive   also a module, which EiN installs at its start with the modules it needs
-#   ./setup.sh --no-ems --no-llm  leave an option out again (--no-mqtt too); its data stays
-#   ./setup.sh --only ein         update one service, ein, ems, db, llm or mqtt, and restart only it
+#   ./setup.sh --no-ems --no-llm  leave an option out again (--no-automation too); its data stays
+#   ./setup.sh --only ein         update one service, ein, ems, db, llm or automation, and restart only it
 #   ./setup.sh --source URL       fetch the sources and the modules from this organisation instead
 #   ./setup.sh --db-dir DIR       keep the database in this folder instead of db under the data folder
 #   ./setup.sh --http-port N      the web interface's port (default: 8080, or the next free one)
@@ -49,7 +50,7 @@ here=$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)
 cd "$here"
 
 main() {
-  local args=("$@") want_ems= want_llm= want_mqtt= modules=() source= db_dir= only= key=${EIN_SOURCE_KEY:-} options=0 unknown=
+  local args=("$@") want_ems= want_llm= want_automation= modules=() source= db_dir= only= key=${EIN_SOURCE_KEY:-} options=0 unknown=
   local http_port= ssh_port= bind=
   data_dir= want_engine=
   while [ $# -gt 0 ]; do
@@ -58,8 +59,8 @@ main() {
       --no-ems) want_ems=0 ;;
       --llm) want_llm=1 ;;
       --no-llm) want_llm=0 ;;
-      --mqtt) want_mqtt=1 ;;
-      --no-mqtt) want_mqtt=0 ;;
+      --automation) want_automation=1 ;;
+      --no-automation) want_automation=0 ;;
       --module)
         [ $# -ge 2 ] || fail "--module needs a name, such as archive"
         modules+=("$2")
@@ -99,7 +100,7 @@ main() {
         shift
         ;;
       --only)
-        [ $# -ge 2 ] || fail "--only needs a service: ein, ems, db, llm or mqtt"
+        [ $# -ge 2 ] || fail "--only needs a service: ein, ems, db, llm or automation"
         only=$2
         shift 2
         continue
@@ -148,20 +149,22 @@ main() {
   [ -z "$bind" ] || set_env EIN_BIND "$bind"
   [ -z "$want_ems" ] || set_env EIN_EMS "$want_ems"
   [ -z "$want_llm" ] || set_env EIN_LLM "$want_llm"
-  [ -z "$want_mqtt" ] || set_env EIN_MQTT "$want_mqtt"
+  [ -z "$want_automation" ] || set_env EIN_AUTOMATION "$want_automation"
   [ ${#modules[@]} = 0 ] || add_modules "${modules[@]}"
   [ -z "$source" ] || set_source "$source"
   [ -z "$key" ] || set_env EIN_SOURCE_KEY "$key"
   [ -z "$db_dir" ] || set_db_dir "$db_dir"
   load_env
   module_sources
-  [ "$EIN_MQTT" != 1 ] || mqtt_accounts
+  [ "$EIN_AUTOMATION" != 1 ] || automation_secrets
+  check_automation_bind
   write_override
 
   # The media service's source comes with its image too: its deploy/ has the fix for the card's CDI
   # spec under podman before 5.
   local repo repos=()
   ! built || repos+=(core db)
+  ! built || [ "$EIN_AUTOMATION" != 1 ] || repos+=(module-automation)
   [ "$EIN_EMS" != 1 ] || repos+=(ems)
   [ "$EIN_LLM" != 1 ] || repos+=(llm)
   [ ${#repos[@]} = 0 ] || step "Fetching the sources"
@@ -187,7 +190,7 @@ main() {
   # one by one (start).
   if [ "$compose_tool" = podman-compose ]; then
     compose down --remove-orphans
-    start db mqtt discovery ein ems llm
+    start db automation ein ems llm
   else
     local recreate=()
     [ -z "$("$engine" ps -aq --filter label=com.docker.compose.project=ein)" ] || recreate=(--force-recreate)
@@ -212,20 +215,21 @@ update_one() {
       [ "${!option}" = 1 ] || fail "$1 is not installed here: ./setup.sh --$1 adds it"
       fetch "$1" "src/$1"
       ;;
-    mqtt)
-      [ "$EIN_MQTT" = 1 ] || fail "mqtt is not installed here: ./setup.sh --mqtt adds it"
-      mqtt_accounts
+    automation)
+      [ "$EIN_AUTOMATION" = 1 ] || fail "automation is not installed here: ./setup.sh --automation adds it"
+      automation_secrets
+      ! built || fetch module-automation src/module-automation
       ;;
-    *) fail "--only takes ein, ems, db, llm or mqtt, not $1" ;;
+    *) fail "--only takes ein, ems, db, llm or automation, not $1" ;;
   esac
   step "Getting $1's image"
   local old
   old=$(built_images)
   build "$1"
   [ "$1" != db ] || prepare_db_dir
-  # EiN goes and comes back with the database, the network listener with the broker it publishes
-  # on: podman keeps a container that another requires, so the one that requires it goes first.
-  if [ "$1" = db ]; then recreate ein db; elif [ "$1" = mqtt ]; then recreate discovery mqtt; else recreate "$1"; fi
+  # EiN goes and comes back with the database: podman keeps a container that another requires, so
+  # the one that requires it goes first.
+  if [ "$1" = db ]; then recreate ein db; else recreate "$1"; fi
   case $1 in
     db) check_db_mount && wait_for_ein ;;
     ein) wait_for_ein && modules_report ;;
@@ -254,10 +258,9 @@ recreate() {
 # through a restart; a plain `podman compose up -d` that creates a container leaves it out.
 start() {
   local service mem
-  for service in db mqtt discovery ein ems llm; do
+  for service in db automation ein ems llm; do
     [[ " $* " == *" $service "* ]] || continue
-    case $service in ems | llm | mqtt) local option=EIN_${service^^}; [ "${!option}" = 1 ] || continue ;; esac
-    [ "$service" != discovery ] || [ "$EIN_MQTT" = 1 ] || continue
+    case $service in ems | llm | automation) local option=EIN_${service^^}; [ "${!option}" = 1 ] || continue ;; esac
     # The dry run writes its commands to stderr, the services this one needs too: 1.0 ignores --no-deps.
     mem=$(compose --dry-run up -d --no-deps "$service" 2>&1 |
       sed -n "/^podman run .* --label com.docker.compose.service=$service /s/.* -m \([^ ]*\) .*/\1/p" | tail -1)
@@ -358,10 +361,10 @@ pick_ein_network() {
   fi
 }
 
-# The loopback ports EiN reaches the database, the media service, the model and the broker on, when it has a
+# The loopback ports EiN reaches the database, the media service and the model on, when it has a
 # network of its own (pick_ein_network): each published on 127.0.0.1 alone, and moved to the next
 # free one like EiN's own ports.
-declare -A loopback_ports=([EIN_DB_PORT]=15432 [EIN_EMS_PORT]=18181 [EIN_LLM_PORT]=18190 [EIN_MQTT_PORT]=11883)
+declare -A loopback_ports=([EIN_DB_PORT]=15432 [EIN_EMS_PORT]=18181 [EIN_LLM_PORT]=18190)
 
 # A service's loopback port as compose reads it in compose.override.yaml: from .env, or the default.
 loopback_port() { echo "\${EIN_${1^^}_PORT:-${loopback_ports[EIN_${1^^}_PORT]}}"; }
@@ -431,12 +434,18 @@ EIN_EMS=0
 EIN_LLM=0
 EIN_GPU=$gpu
 
-# The MQTT broker, with setup.sh --mqtt: the port the devices on this network reach it on, of
-# EIN_BIND, and the passwords EiN (\`ein\`) and the devices (\`device\`) sign in with.
-EIN_MQTT=0
+# The Automation module's sidecar, with setup.sh --automation, on this machine's own network: its
+# MQTT broker, on the port the devices on this network reach it on, of EIN_BIND, with the passwords
+# EiN (\`ein\`) and the devices (\`device\`) sign in with; and its restreamer for cameras, with
+# its API, its RTSP and its WebRTC (TCP and UDP) ports, and the password EiN signs in to it with.
+EIN_AUTOMATION=0
 MQTT_PORT=1883
 MQTT_EIN_PASSWORD=$(secret)
 MQTT_DEVICE_PASSWORD=$(secret 12)
+STREAMS_PORT=1984
+RTSP_PORT=8554
+WEBRTC_PORT=8555
+STREAMS_PASSWORD=$(secret)
 
 # The modules EiN installs at its start when it lacks them, with the modules they need, into the
 # modules folder under EIN_DATA; setup.sh --module adds one. Settings → Modules lists the published
@@ -524,25 +533,40 @@ unset_env() { sed -i "/^$1=/d" .env; }
 load_env() {
   # shellcheck disable=SC1091
   set -a && . ./.env && set +a
-  : "${EIN_MQTT:=0}"
+  : "${EIN_AUTOMATION:=0}"
   [ -n "${EIN_HOSTNAME:-}" ] || { EIN_HOSTNAME=$(machine_name); set_env EIN_HOSTNAME "$EIN_HOSTNAME"; export EIN_HOSTNAME; }
 }
 
 # This machine's name without its domain.
 machine_name() { local name; name=$(uname -n); echo "${name%%.*}"; }
 
-# The broker's two accounts: their passwords kept in .env, made the first time, and written hashed
-# into EIN_DATA/mqtt/passwords, the broker's data folder, by the broker's own image as its root: the
-# file is the broker's user's after its first start. The passwords go in on standard input, never
-# on a command line.
-mqtt_accounts() {
-  [ -n "${MQTT_EIN_PASSWORD:-}" ] || { MQTT_EIN_PASSWORD=$(secret); set_env MQTT_EIN_PASSWORD "$MQTT_EIN_PASSWORD"; }
-  [ -n "${MQTT_DEVICE_PASSWORD:-}" ] || { MQTT_DEVICE_PASSWORD=$(secret 12); set_env MQTT_DEVICE_PASSWORD "$MQTT_DEVICE_PASSWORD"; }
-  [ -n "${MQTT_PORT:-}" ] || { MQTT_PORT=1883; set_env MQTT_PORT "$MQTT_PORT"; }
+# The sidecar's passwords and ports, kept in .env, made the first time where an older .env lacks
+# them. The sidecar hashes the broker's passwords itself, into its data folder EIN_DATA/mqtt, which
+# keeps the broker's retained messages too.
+automation_secrets() {
+  local name value
+  for name in MQTT_EIN_PASSWORD MQTT_DEVICE_PASSWORD STREAMS_PASSWORD; do
+    [ -z "${!name:-}" ] || continue
+    if [ "$name" = MQTT_DEVICE_PASSWORD ]; then value=$(secret 12); else value=$(secret); fi
+    set_env "$name" "$value"
+    printf -v "$name" %s "$value"
+  done
+  for name in MQTT_PORT=1883 STREAMS_PORT=1984 RTSP_PORT=8554 WEBRTC_PORT=8555; do
+    value=${name#*=}
+    name=${name%%=*}
+    [ -z "${!name:-}" ] || continue
+    set_env "$name" "$value"
+    printf -v "$name" %s "$value"
+  done
   mkdir -p "$EIN_DATA/mqtt"
-  printf 'ein:%s\ndevice:%s\n' "$MQTT_EIN_PASSWORD" "$MQTT_DEVICE_PASSWORD" |
-    "$engine" run --rm -i --user 0 --entrypoint sh -v "$EIN_DATA/mqtt:/work:z" "${MQTT_IMAGE:-docker.io/library/eclipse-mosquitto:2}" -c \
-      'cat >/work/passwords && mosquitto_passwd -U /work/passwords && chown 1883:1883 /work/passwords && chmod 600 /work/passwords'
+}
+
+# The sidecar is on this machine's own network, and EiN on the compose network reaches it at this
+# machine's address on that network, never at its loopback: listening on 127.0.0.1 alone, it would be
+# out of EiN's reach there.
+check_automation_bind() {
+  [ "$EIN_AUTOMATION" = 1 ] && [ -z "$ein_network" ] && [ "${EIN_BIND:-0.0.0.0}" = 127.0.0.1 ] || return 0
+  fail "--automation listens on EIN_BIND, 127.0.0.1 here, where EiN's container cannot reach it under $engine: set EIN_BIND=0.0.0.0, or leave the sidecar out with --no-automation"
 }
 
 # One run in this folder at a time: this script runs again under flock, which holds a lock on the
@@ -611,8 +635,9 @@ built() {
   ! is_github "$EIN_SOURCE" || [ "${owner,,}" != einhq ]
 }
 
-# The image a service runs, ein, db or ems: the one GitHub publishes from the repository of that
-# name (core for EiN), as compose.yaml and compose.ems.yaml name it, or the one built here.
+# The image a service runs, ein, db, ems or automation: the one GitHub publishes from the repository
+# of that name (core for EiN, module-automation's sidecar for automation), as the compose files name
+# it, or the one built here.
 image_of() {
   local repo=$1
   [ "$repo" != ein ] || repo=core
@@ -676,10 +701,14 @@ check_db_mount() {
 
 # EiN's ports, each moved to the next free one when something else on this machine listens on it,
 # such as another web server on 8080; one that EiN's containers publish is EiN's own. With a network
-# of its own, the loopback ports too.
+# of its own, the loopback ports too. The sidecar's, which it listens on itself on this machine's
+# network, are its own while it runs.
 free_ports() {
   local name port was ours names=(EIN_HTTP_PORT EIN_SSH_PORT)
-  [ "$EIN_MQTT" != 1 ] || names+=(MQTT_PORT)
+  if [ "$EIN_AUTOMATION" = 1 ] &&
+    [ -z "$("$engine" ps -q --filter label=com.docker.compose.project=ein --filter label=com.docker.compose.service=automation)" ]; then
+    names+=(MQTT_PORT STREAMS_PORT RTSP_PORT WEBRTC_PORT)
+  fi
   [ -z "$ein_network" ] || names+=("${!loopback_ports[@]}")
   ours=$("$engine" ps --filter label=com.docker.compose.project=ein --format '{{.Ports}}')
   for name in "${names[@]}"; do
@@ -713,9 +742,15 @@ port_taken() {
 # reach this machine's loopback, every port of it, at 10.0.2.2. A proxy on this machine reaches EiN
 # from there too under slirp4netns, so EiN believes its forwarding headers (TRUSTED_PROXIES), and
 # those of any proxy .env names in TRUSTED_PROXIES.
+#
+# The automation sidecar is on this machine's own network, listening on its ports itself. EiN with a
+# network of its own reaches it at this machine's loopback as it reaches the others; on the compose
+# network, at this machine's address there: host.containers.internal under podman, the name
+# automation as host-gateway under Docker.
 write_override() {
   local service option lines env devices written=0 reached=() hosts=() forwards=() files_address files_published=
-  local -A port_in=([db]=5432 [ems]=8181 [llm]=8190 [mqtt]=1883)
+  local automation_host=automation
+  local -A port_in=([db]=5432 [ems]=8181 [llm]=8190)
   # The media service reaches the files of its requests at EiN's ems-files port: by EiN's name on
   # the compose network, or, with EiN on a network of its own, at this machine's address, where the
   # port is published. One that .env names, a media service elsewhere, reaches it published too.
@@ -732,22 +767,31 @@ write_override() {
     reached=(db)
     [ "$EIN_EMS" != 1 ] || reached+=(ems)
     [ "$EIN_LLM" != 1 ] || reached+=(llm)
-    [ "$EIN_MQTT" != 1 ] || reached+=(mqtt)
+    [ "$EIN_AUTOMATION" != 1 ] || reached+=(automation)
     for service in "${reached[@]}"; do
       hosts+=("\"$service:$([ "$ein_network" = pasta ] && echo 127.0.0.1 || echo 10.0.2.2)\"")
-      forwards+=("-T,$(loopback_port "$service")")
+      if [ "$service" = automation ]; then
+        forwards+=("-T,\${MQTT_PORT:-1883}" "-T,\${STREAMS_PORT:-1984}")
+      else
+        forwards+=("-T,$(loopback_port "$service")")
+      fi
     done
+  elif [ "$EIN_AUTOMATION" = 1 ] && [ "$engine" = docker ]; then
+    hosts+=("\"automation:host-gateway\"")
+  elif [ "$EIN_AUTOMATION" = 1 ]; then
+    automation_host=host.containers.internal
   fi
   {
     echo "# Written by setup.sh from the options in .env and the container engine; edit those and run"
     echo "# setup.sh again."
     echo "services:"
-    for service in db mqtt discovery ein ems llm; do
+    for service in db automation ein ems llm; do
       lines=()
       case $service in
-        mqtt | discovery)
-          [ "$EIN_MQTT" = 1 ] || continue
-          lines+=("extends: { file: compose.mqtt.yaml, service: $service }")
+        automation)
+          [ "$EIN_AUTOMATION" = 1 ] || continue
+          lines+=("extends: { file: compose.automation.yaml, service: automation }")
+          ! built || lines+=("image: $(image_of automation)" "build: { context: src/module-automation/sidecar, dockerfile: Containerfile }")
           ;;
         ems | llm)
           option=EIN_${service^^}
@@ -772,16 +816,20 @@ write_override() {
               # A proxy on this machine reaches EiN from 10.0.2.2, not from loopback.
               env+=("TRUSTED_PROXIES: \"10.0.2.2,\${TRUSTED_PROXIES:-}\"")
             fi
-            lines+=("extra_hosts: [$(IFS=,; echo "${hosts[*]}")]")
             env+=("POSTGRES_URL: postgres://ein:\${POSTGRES_PASSWORD}@db:$(loopback_port db)/ein")
             [ "$EIN_EMS" != 1 ] || env+=("CFG_EMS_URL: http://ems:$(loopback_port ems)")
             [ "$EIN_LLM" != 1 ] || [ -n "${CFG_LLM_URL:-}" ] || env+=("CFG_LLM_URL: http://llm:$(loopback_port llm)")
           fi
-          if [ "$EIN_MQTT" = 1 ] && [ -z "${CFG_AUTOMATION_MQTT_URL:-}" ]; then
-            env+=("CFG_AUTOMATION_MQTT_URL: mqtt://mqtt:$([ -n "$ein_network" ] && loopback_port mqtt || echo 1883)")
+          [ ${#hosts[@]} = 0 ] || lines+=("extra_hosts: [$(IFS=,; echo "${hosts[*]}")]")
+          if [ "$EIN_AUTOMATION" = 1 ] && [ -z "${CFG_AUTOMATION_MQTT_URL:-}" ]; then
+            env+=("CFG_AUTOMATION_MQTT_URL: mqtt://$automation_host:\${MQTT_PORT:-1883}")
             env+=("CFG_AUTOMATION_MQTT_USER: ein" "CFG_AUTOMATION_MQTT_KEY: \${MQTT_EIN_PASSWORD}")
             # What a device added from the network signs in with.
             env+=("CFG_AUTOMATION_DEVICE_USER: device" "CFG_AUTOMATION_DEVICE_KEY: \${MQTT_DEVICE_PASSWORD}")
+          fi
+          if [ "$EIN_AUTOMATION" = 1 ] && [ -z "${CFG_AUTOMATION_STREAMS_URL:-}" ]; then
+            env+=("CFG_AUTOMATION_STREAMS_URL: http://$automation_host:\${STREAMS_PORT:-1984}")
+            env+=("CFG_AUTOMATION_STREAMS_KEY: \${STREAMS_PASSWORD}")
           fi
           [ -z "$files_address" ] || [ -n "${CFG_EMS_FILES_ADDRESS:-}" ] || env+=("CFG_EMS_FILES_ADDRESS: $files_address")
           [ ${#env[@]} = 0 ] || lines+=("environment:" "${env[@]/#/  }")
@@ -837,13 +885,15 @@ add_modules() {
   set_env EIN_MODULES "\"${names[*]}\""
 }
 
-# Every image, or the one service's when one is named: EiN's, the database's and the media service's
-# pulled, or built from their sources (built). The model's is neither: compose up pulls it.
+# Every image, or the one service's when one is named: EiN's, the database's, the media service's
+# and the automation sidecar's pulled, or built from their sources (built). The model's is neither:
+# compose up pulls it.
 build() {
   local one=${1:-} service services=()
-  for service in ein db ems; do
+  for service in ein db ems automation; do
     [ -z "$one" ] || [ "$one" = "$service" ] || continue
     [ "$service" != ems ] || [ "$EIN_EMS" = 1 ] || continue
+    [ "$service" != automation ] || [ "$EIN_AUTOMATION" = 1 ] || continue
     services+=("$service")
   done
   [ ${#services[@]} != 0 ] || return 0
@@ -911,7 +961,7 @@ podman_compose_build() {
 # The ids of the images build tags or pull.
 built_images() {
   local repo name
-  for repo in core db ems; do
+  for repo in core db ems automation; do
     for name in "localhost/ein-$repo" "ghcr.io/einhq/$repo:main"; do
       "$engine" image inspect --format '{{.Id}}' "$name" 2>/dev/null || true
     done

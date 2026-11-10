@@ -1,0 +1,34 @@
+# The Automation module's sidecar, as an option: setup.sh --automation names it in
+# compose.override.yaml. One container, built from module-automation's sidecar/, with three
+# services in it:
+#
+# - an MQTT broker (Mosquitto) for the devices, with no anonymous clients: EiN signs in as `ein` and
+#   the devices as `device`, with MQTT_EIN_PASSWORD and MQTT_DEVICE_PASSWORD from .env. The devices
+#   on this machine's network reach it on MQTT_PORT of EIN_BIND; it keeps retained messages, such as
+#   the devices' announcements, in EIN_DATA/mqtt across restarts;
+# - a listener for what announces itself on this machine's network, published on the broker for the
+#   Automation module to offer as devices;
+# - a restreamer (go2rtc) for cameras: one connection to each camera, served again to EiN's pages
+#   and to the media service. Its API is on STREAMS_PORT and its RTSP on RTSP_PORT, both of EIN_BIND
+#   behind the account `ein` and STREAMS_PASSWORD; WebRTC on WEBRTC_PORT, TCP and UDP.
+#
+# It is on the host's network: the listener's multicast never leaves the network it is sent on, and
+# WebRTC's media goes straight to the browser.
+services:
+  automation:
+    image: ${AUTOMATION_IMAGE:-ghcr.io/einhq/automation:main}
+    restart: unless-stopped
+    network_mode: host
+    mem_limit: 512m
+    memswap_limit: 512m
+    volumes:
+      - ${EIN_DATA}/mqtt:/data/mqtt:z
+    environment:
+      EIN_BIND: ${EIN_BIND:-0.0.0.0}
+      MQTT_PORT: ${MQTT_PORT:-1883}
+      MQTT_EIN_PASSWORD: ${MQTT_EIN_PASSWORD}
+      MQTT_DEVICE_PASSWORD: ${MQTT_DEVICE_PASSWORD}
+      STREAMS_PORT: ${STREAMS_PORT:-1984}
+      RTSP_PORT: ${RTSP_PORT:-8554}
+      WEBRTC_PORT: ${WEBRTC_PORT:-8555}
+      STREAMS_PASSWORD: ${STREAMS_PASSWORD}

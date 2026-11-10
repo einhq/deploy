@@ -13,16 +13,18 @@ curl -fsSL https://einhq.eu/install.sh | bash -s -- --yes  # the defaults, askin
 off the command line: `INITIAL_ADMIN_PASSWORD`, the admin's first password at the install (made
 here when it is not given), and `EIN_SOURCE_KEY` (below).
 
-What is installed is EiN and its database. The media service, the assistant's language model, an
-MQTT broker and the modules are added to it with options, at the first install or any time after:
+What is installed is EiN and its database. The media service, the assistant's language model, the
+Automation module's sidecar and the modules are added to it with options, at the first install or
+any time after:
 
 ```bash
 ./setup.sh --ems              # the media service: every media tool and model, an image of about 30 GB
 ./setup.sh --llm              # the assistant's language model, Qwen3.5-4B in llama.cpp
-./setup.sh --mqtt             # an MQTT broker (Mosquitto) for the Automation module's devices, on port 1883
+./setup.sh --automation       # the Automation module's sidecar: an MQTT broker for its devices on port 1883,
+                              # a listener for devices on the network, a restreamer for cameras
 ./setup.sh --module archive   # a module, which EiN installs at its start with the modules it needs (archive needs ems)
 ./setup.sh                    # update: this folder and the newest images, pulled and restarted
-./setup.sh --only ein         # update one service, ein, ems, db, llm or mqtt, and restart only it
+./setup.sh --only ein         # update one service, ein, ems, db, llm or automation, and restart only it
 ./setup.sh --http-port 8081   # the web interface's port; --ssh-port SSH and SFTP's
 ./setup.sh --bind 127.0.0.1   # listen on this machine alone, behind an HTTPS proxy of your own
 ```
@@ -31,21 +33,22 @@ At the first run only, when it writes `.env`: `--data DIR` names the data folder
 and `--engine podman|docker` the container engine.
 
 The installer passes the same options on: `curl … | bash -s -- --ems --module archive`. An option
-chosen once is kept in `.env`; `--no-ems`, `--no-llm` and `--no-mqtt` leave one out again, and its
-data stays.
+chosen once is kept in `.env`; `--no-ems`, `--no-llm` and `--no-automation` leave one out again, and
+its data stays.
 `./setup.sh --help` lists everything.
 
 ```
-compose.yaml          EiN and PostgreSQL: the base every install runs
-compose.ems.yaml      the media service, which --ems adds
-compose.llm.yaml      the language model, which --llm adds
-compose.mqtt.yaml     the MQTT broker and the network listener, which --mqtt adds, with their files in mqtt/
-setup.sh              updates this folder, writes .env and compose.override.yaml, pulls or builds the images, starts
+compose.yaml            EiN and PostgreSQL: the base every install runs
+compose.ems.yaml        the media service, which --ems adds
+compose.llm.yaml        the language model, which --llm adds
+compose.automation.yaml the Automation module's sidecar, which --automation adds
+setup.sh                updates this folder, writes .env and compose.override.yaml, pulls or builds the images, starts
 
-src/                  the sources setup.sh fetches: ems and llm with their options, and core and db from your own
-.env                  the settings, with the passwords made at the install
-compose.override.yaml the options in .env as services, and podman's restart policy, written by setup.sh
-data/                 your files, the installed modules and the database, unless --data named another folder at the install
+src/                    the sources setup.sh fetches: ems and llm with their options, and core, db and
+                        module-automation from your own
+.env                    the settings, with the passwords made at the install
+compose.override.yaml   the options in .env as services, and podman's restart policy, written by setup.sh
+data/                   your files, the installed modules and the database, unless --data named another folder at the install
 ```
 
 The last four are made here and are not in the repository. Every run of `setup.sh` first brings this
@@ -57,8 +60,9 @@ a second waits for the first to end, under `flock` on this folder.
 The images are pulled: GitHub builds them once a day from the `main` of their repositories, when it
 has moved since the last build, EiN's as `ghcr.io/einhq/core:main` with the web interface built in,
 the database's as `ghcr.io/einhq/db:main` (and again every week, for PostgreSQL's minor releases)
-and the media service's as `ghcr.io/einhq/ems:main`. From another source they are built here instead (below). The
-model's is llama.cpp's own.
+and the media service's as `ghcr.io/einhq/ems:main`; the automation sidecar's, `ghcr.io/einhq/automation:main`,
+is built when its folder in module-automation changes. From another source they are built here
+instead (below). The model's is llama.cpp's own.
 
 Back up `.env` and the data folder, which holds the database too, unless `--db-dir` put it
 elsewhere (below).
@@ -139,9 +143,9 @@ curl -fsSL -H "Authorization: token $K" 'http://forge.example:3000/api/v1/repos/
 `--source` again moves an installation to another. A source on another host, such as GitHub again,
 drops the token, unless `EIN_SOURCE_KEY` gives a new one with it. git gets the token as a header for
 each call, so it is in no `.git/config`. From any source but GitHub's `einhq`, the images of EiN,
-the database and the media service are built here from the sources of core, db and ems, as
-`localhost/ein-core`, `localhost/ein-db` and `localhost/ein-ems`, since the published images have
-none of their own commits. The media service's build fetches its wheels and models for about an
+the database, the media service and the automation sidecar are built here from the sources of core,
+db, ems and module-automation, as `localhost/ein-core`, `localhost/ein-db`, `localhost/ein-ems` and
+`localhost/ein-automation`, since the published images have none of their own commits. The media service's build fetches its wheels and models for about an
 hour. From a Forgejo or a Gitea, EiN installs its modules from there too: setup.sh writes
 `CFG_MODULE_SOURCES` and `CFG_MODULE_SOURCES_KEY` into `.env` for it, and Settings → Modules lists
 that organisation's modules.
@@ -194,18 +198,29 @@ echo 'ACTION=="add", SUBSYSTEM=="bdi", KERNEL=="0:*", RUN+="/bin/sh -c '\''sleep
 sudo udevadm control --reload
 ```
 
-With `--mqtt`, the broker takes no anonymous clients. EiN signs in as `ein` and the devices as
-`device`, with the passwords `MQTT_EIN_PASSWORD` and `MQTT_DEVICE_PASSWORD` that `./setup.sh` made in
-`.env`; give a device the broker's address (this machine, port `MQTT_PORT`, 1883), the user `device`
-and that password. Changing a password there takes effect at the next `./setup.sh`. The broker is
-plain MQTT on your network, without TLS: keep port 1883 off the internet.
+`--automation` runs the Automation module's sidecar, one container on this machine's own network
+with three services in it. Its broker takes no anonymous clients. EiN signs in as `ein` and the
+devices as `device`, with the passwords `MQTT_EIN_PASSWORD` and `MQTT_DEVICE_PASSWORD` that
+`./setup.sh` made in `.env`; give a device the broker's address (this machine, port `MQTT_PORT`,
+1883), the user `device` and that password. Changing a password there takes effect at the next
+`./setup.sh`. The broker is plain MQTT on your network, without TLS: keep port 1883 off the internet.
 
-`--mqtt` also runs `discovery` beside the broker, on this machine's own network: every two minutes
-it asks what is there over mDNS and SSDP, hears mDNS announcements in between on port 5353 beside
-any responder already there such as Avahi, and publishes the answers on the broker, where the
-Automation module names them and offers the ones it can take as devices (Devices → _found_). A
-Shelly is added from there: EiN gives it the broker's address and the `device` account itself. It
-sends multicast on the network this machine is on, and nothing leaves it.
+Its listener asks what is on the network every two minutes over mDNS and SSDP, hears mDNS
+announcements in between on port 5353 beside any responder already there such as Avahi, and
+publishes the answers on the broker, where the Automation module names them and offers the ones it
+can take as devices (Devices → _found_). A Shelly is added from there: EiN gives it the broker's
+address and the `device` account itself. It sends multicast on the network this machine is on, and
+nothing leaves it.
+
+Its restreamer, go2rtc, keeps one connection to each camera EiN has and serves it again: to EiN,
+which shows it in the browser, on `STREAMS_PORT` (1984), and over RTSP on `RTSP_PORT` (8554), both
+behind the account `ein` and `STREAMS_PASSWORD`, and over WebRTC on `WEBRTC_PORT` (8555, TCP and
+UDP). EiN gives it the cameras itself; the camera's own password stays with EiN and the sidecar.
+On this machine RTSP lets anyone in without a password, as go2rtc does for every local client. Keep
+these ports off the internet too.
+
+Under Docker and rootful podman, EiN reaches the sidecar at this machine's address on the compose
+network, so it needs `EIN_BIND` to be `0.0.0.0`; `setup.sh` says so when it is not.
 
 ## The graphics card
 
