@@ -11,12 +11,24 @@
 #   ./setup.sh --no-ems --no-llm  leave an option out again (--no-mqtt too); its data stays
 #   ./setup.sh --only ein         update one service, ein, ems, db, llm or mqtt, and restart only it
 #   ./setup.sh --source URL       fetch the sources and the modules from this organisation instead
-#   ./setup.sh --db-dir DIR       keep the database in this folder instead of db under EIN_DATA
+#   ./setup.sh --db-dir DIR       keep the database in this folder instead of db under the data folder
+#   ./setup.sh --http-port N      the web interface's port (default: 8080, or the next free one)
+#   ./setup.sh --ssh-port N       SSH and SFTP's port (default: 2222, or the next free one)
+#   ./setup.sh --bind ADDRESS     the address they listen on: 0.0.0.0, every one (default), or
+#                                 127.0.0.1, this machine alone, behind an HTTPS proxy of your own
+#
+# The first run only, when it writes .env:
+#   --data DIR                    the folder for your originals, the renditions, scratch space, the
+#                                 model, the modules and the database (default: ./data)
+#   --engine podman|docker        the container engine (default: podman when it is installed)
+#   INITIAL_ADMIN_PASSWORD        in the environment, never on a command line: the admin account's
+#                                 first password, 8 characters or more, without ' or \; without it
+#                                 one is made, and shown at the end
 #
 # An option once chosen is kept in .env, so a later run without it keeps it. With podman or Docker,
-# whichever is here (podman first; EIN_ENGINE=docker picks Docker), and its compose: `podman compose`
-# or `docker compose`, which work from this folder afterwards as usual (ps, logs, down, up -d). The
-# engine is kept in .env too: a later run uses it, whichever else is installed. Under podman-compose,
+# whichever is here (podman first), and its compose: `podman compose` or `docker compose`, which
+# work from this folder afterwards as usual (ps, logs, down, up -d). The engine is kept in .env too:
+# a later run uses it, whichever else is installed. Under podman-compose,
 # a container that `podman compose up -d` makes again, after a change to .env, has no swap limit:
 # this script gives each one (see start), and a run of it gives it back. An update that came up
 # removes the images it replaced, and says how much that freed.
@@ -29,11 +41,8 @@
 # environment is the token that reads the source, when its repositories are private; it is kept in
 # .env with the source, and a --source on another host without a token of its own drops it.
 #
-# Read the first time only, when .env is written:
-#   EIN_DATA       the folder for your originals, the renditions, scratch space, the model and the
-#                  database (default: ./data)
-#   EIN_HTTP_PORT  the web interface's port (default: 8080, or the next free one)
-#   EIN_SSH_PORT   SSH and SFTP's port (default: 2222, or the next free one)
+# The secrets come in the environment, every other setting as an option. setup.sh asks nothing:
+# the installer asks, and passes the answers on.
 set -euo pipefail
 
 here=$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)
@@ -41,6 +50,8 @@ cd "$here"
 
 main() {
   local args=("$@") want_ems= want_llm= want_mqtt= modules=() source= db_dir= only= key=${EIN_SOURCE_KEY:-} options=0 unknown=
+  local http_port= ssh_port= bind=
+  data_dir= want_engine=
   while [ $# -gt 0 ]; do
     case $1 in
       --ems) want_ems=1 ;;
@@ -64,6 +75,27 @@ main() {
       --db-dir)
         [ $# -ge 2 ] || fail "--db-dir needs a folder"
         db_dir=$2
+        shift
+        ;;
+      --data)
+        [ $# -ge 2 ] || fail "--data needs a folder"
+        data_dir=$2
+        shift
+        ;;
+      --http-port | --ssh-port)
+        [ $# -ge 2 ] && is_port "$2" || fail "$1 takes a port, 1 to 65535"
+        if [ "$1" = --http-port ]; then http_port=$2; else ssh_port=$2; fi
+        shift
+        ;;
+      --bind)
+        [ $# -ge 2 ] && [[ $2 =~ ^[0-9a-fA-F.:]+$ ]] ||
+          fail "--bind takes an address of this machine: 0.0.0.0, every one, or 127.0.0.1, this machine alone"
+        bind=$2
+        shift
+        ;;
+      --engine)
+        [ $# -ge 2 ] || fail "--engine needs podman or docker"
+        want_engine=$2
         shift
         ;;
       --only)
@@ -102,7 +134,18 @@ main() {
     echo "The compose files changed, so every service is updated and started again, not $only alone"
   fi
 
-  [ -f .env ] || write_env
+  if [ -f .env ]; then
+    # The data folder holds the database and everything else: it is chosen once.
+    local kept_data
+    kept_data=$(sed -n 's/^EIN_DATA=//p' .env)
+    [ -z "$data_dir" ] || [ "$(cd "$data_dir" 2>/dev/null && pwd)" = "$kept_data" ] ||
+      fail "--data is chosen at the install, and the data folder here is $kept_data"
+  else
+    write_env
+  fi
+  [ -z "$http_port" ] || set_env EIN_HTTP_PORT "$http_port"
+  [ -z "$ssh_port" ] || set_env EIN_SSH_PORT "$ssh_port"
+  [ -z "$bind" ] || set_env EIN_BIND "$bind"
   [ -z "$want_ems" ] || set_env EIN_EMS "$want_ems"
   [ -z "$want_llm" ] || set_env EIN_LLM "$want_llm"
   [ -z "$want_mqtt" ] || set_env EIN_MQTT "$want_mqtt"
@@ -154,6 +197,7 @@ main() {
   wait_for_ein
   remove_replaced $old
   after_reboot
+  modules_report
   modules_need
 }
 
@@ -184,7 +228,7 @@ update_one() {
   if [ "$1" = db ]; then recreate ein db; elif [ "$1" = mqtt ]; then recreate discovery mqtt; else recreate "$1"; fi
   case $1 in
     db) check_db_mount && wait_for_ein ;;
-    ein) wait_for_ein ;;
+    ein) wait_for_ein && modules_report ;;
   esac
   remove_replaced $old
 }
@@ -225,6 +269,31 @@ start() {
   done
 }
 
+# The modules EiN runs from its modules folder, each at the release it was installed at, and what
+# its start said of those it could not install or run. EiN installs a module's newest release that
+# its core runs, which is older than the newest published when the image is older than the module.
+modules_report() {
+  local dir version ref id lines=()
+  for dir in "$EIN_DATA"/modules/*/; do
+    [ -f "$dir/mod.json" ] || continue
+    version=$(json_field version "$dir/mod.json")
+    ref=$(json_field ref "$dir/.install.json")
+    lines+=("$(basename "$dir") ${version:-?}${ref:+ ($ref)}")
+  done
+  [ ${#lines[@]} != 0 ] || return 0
+  echo "The modules installed:"
+  printf '  %s\n' "${lines[@]}"
+  id=$("$engine" ps -q --filter label=com.docker.compose.project=ein --filter label=com.docker.compose.service=ein | head -1)
+  [ -n "$id" ] || return 0
+  # Its log lines are "[time] [level] [component] text", the level coloured.
+  "$engine" logs "$id" 2>&1 | sed -E 's/\x1b\[[0-9;]*m//g; s/^\[[^]]*\] \[[^]]*\] \[[^]]*\] //' |
+    grep -E 'needs core API|^mod (install|setup): ' | sed 's/^/  /' || true
+}
+
+# A string field of a JSON file as JSON.stringify writes it, a field to a line; nothing when the
+# file or the field is not there.
+json_field() { [ ! -f "$2" ] || sed -n "s/^ *\"$1\": *\"\([^\"]*\)\".*/\1/p" "$2" | head -1; }
+
 # A module that needs a service which is not installed here, said last, where it is read. The
 # Archive's photos, videos and documents are analysed by the media service.
 modules_need() {
@@ -233,21 +302,21 @@ modules_need() {
   fi
 }
 
-# The engine kept in .env, or on the first run EIN_ENGINE, else podman, else Docker. Under the other
+# The engine kept in .env, or on the first run --engine, else podman, else Docker. Under the other
 # engine EiN would be a second one beside the first, without its database.
 pick_engine() {
   local kept=
   [ ! -f .env ] || kept=$(sed -n 's/^EIN_ENGINE=//p' .env)
-  if [ -n "$kept" ] && [ -n "${EIN_ENGINE:-}" ] && [ "$EIN_ENGINE" != "$kept" ]; then
-    fail "EiN here runs under $kept (EIN_ENGINE in .env); under $EIN_ENGINE it would be a second, empty EiN beside it. Run ./setup.sh without EIN_ENGINE=$EIN_ENGINE"
+  if [ -n "$kept" ] && [ -n "$want_engine" ] && [ "$want_engine" != "$kept" ]; then
+    fail "EiN here runs under $kept (EIN_ENGINE in .env); under $want_engine it would be a second, empty EiN beside it. Run ./setup.sh without --engine $want_engine"
   fi
-  engine=${kept:-${EIN_ENGINE:-}}
+  engine=${kept:-$want_engine}
   if [ -z "$engine" ]; then
     if command -v podman >/dev/null; then engine=podman; elif command -v docker >/dev/null; then engine=docker; else
       fail "neither podman nor Docker is installed"
     fi
   fi
-  case $engine in podman | docker) ;; *) fail "EIN_ENGINE is podman or docker, not $engine" ;; esac
+  case $engine in podman | docker) ;; *) fail "--engine takes podman or docker, not $engine" ;; esac
   command -v "$engine" >/dev/null || fail "EiN here runs under $engine, which is not installed"
   "$engine" compose version >/dev/null 2>&1 ||
     fail "'$engine compose' does not run: install podman-compose (or docker-compose) for podman, or the compose plugin for Docker"
@@ -320,7 +389,14 @@ running_hash() {
 
 # The settings, with passwords made here: nothing else keeps them, so this file is the one to back up.
 write_env() {
-  local data=${EIN_DATA:-$here/data} gpu=0
+  local data=${data_dir:-$here/data} gpu=0 password=${INITIAL_ADMIN_PASSWORD:-}
+  # .env is read by bash, by compose and by podman-compose's dotenv, which each take a backslash in
+  # quotes their own way.
+  if [ -n "$password" ]; then
+    [ ${#password} -ge 8 ] || fail "INITIAL_ADMIN_PASSWORD is shorter than 8 characters"
+    [[ $password != *[\'\\]* && $password != *$'\n'* ]] ||
+      fail "INITIAL_ADMIN_PASSWORD holds a ' or a \\, which .env cannot keep as they are: choose one without"
+  fi
   # A database from an earlier install has the password of that install's .env, which a new one
   # does not know: EiN would not get in.
   ! "$engine" volume inspect ein_db >/dev/null 2>&1 ||
@@ -374,16 +450,13 @@ POSTGRES_PASSWORD=$(secret)
 EMS_KEY=$(secret)
 TZ=$(timedatectl show -p Timezone --value 2>/dev/null || cat /etc/timezone 2>/dev/null || echo UTC)
 
-# The admin account's first password, which EiN takes at its first start; changing it here later
-# does nothing. setup.sh shows it at the end of each run until you delete this line: do that once
-# you have changed the password in EiN.
-INITIAL_ADMIN_PASSWORD=$(secret 8)
+$(admin_password "$password")
 
 # The web interface and SSH, on every address of this machine. 127.0.0.1 keeps them to this machine,
 # behind an HTTPS proxy of your own.
 EIN_BIND=0.0.0.0
-EIN_HTTP_PORT=${EIN_HTTP_PORT:-8080}
-EIN_SSH_PORT=${EIN_SSH_PORT:-2222}
+EIN_HTTP_PORT=8080
+EIN_SSH_PORT=2222
 
 # A hosted language model instead of --llm: its address (without /v1), key, name and model.
 # CFG_LLM_URL=https://api.openai.com
@@ -410,6 +483,23 @@ EOF
 # belongs to one of this user's subordinate ids, under Docker to root's.
 remove_dir_command() { if [ "$engine" = podman ] && [ "$(id -u)" != 0 ]; then echo "podman unshare rm -rf"; else echo "sudo rm -rf"; fi; }
 
+# .env's lines for the admin account's first password: the one chosen at the install, which
+# setup.sh removes once EiN has taken it, or one made here, which it shows until you delete it.
+admin_password() {
+  if [ -n "$1" ]; then
+    printf '%s\n' "$CHOSEN_PASSWORD" \
+      "# EiN takes it at its first start, and setup.sh removes these lines once EiN has answered." \
+      "INITIAL_ADMIN_PASSWORD='$1'"
+  else
+    printf '%s\n' \
+      "# The admin account's first password, which EiN takes at its first start; changing it here later" \
+      "# does nothing. setup.sh shows it at the end of each run until you delete this line: do that once" \
+      "# you have changed the password in EiN." \
+      "INITIAL_ADMIN_PASSWORD=$(secret 8)"
+  fi
+}
+CHOSEN_PASSWORD="# The admin account's first password, chosen at the install."
+
 # A random secret for .env, in hex: 24 bytes, or as many as given.
 secret() { head -c "${1:-24}" /dev/urandom | od -An -tx1 | tr -d ' \n'; }
 
@@ -421,6 +511,8 @@ swap_note() {
     "# which setup.sh gives it: the media service's idle models then go to swap, and a search waits" \
     "# for them. ./setup.sh makes the containers again with it."
 }
+
+is_port() { [[ $1 =~ ^[0-9]+$ ]] && [ "$1" -ge 1 ] && [ "$1" -le 65535 ]; }
 
 set_env() {
   if grep -q "^$1=" .env; then sed -i "s|^$1=.*|$1=$2|" .env; else echo "$1=$2" >>.env; fi
@@ -858,8 +950,12 @@ wait_for_ein() {
     if curl -fs -o /dev/null --max-time 5 "$url"; then
       echo
       echo "EiN is up at http://$(hostname):$EIN_HTTP_PORT/"
-      [ -z "${INITIAL_ADMIN_PASSWORD:-}" ] ||
+      if grep -qxF "$CHOSEN_PASSWORD" .env; then
+        sed -i "/^$CHOSEN_PASSWORD\$/,/^INITIAL_ADMIN_PASSWORD=/d" .env
+        echo "Sign in as admin with the password you chose."
+      elif [ -n "${INITIAL_ADMIN_PASSWORD:-}" ]; then
         echo "Sign in as admin with the password $INITIAL_ADMIN_PASSWORD and change it, then delete the line INITIAL_ADMIN_PASSWORD from $here/.env."
+      fi
       return
     fi
     # A container that stopped, or that its engine restarts again and again, does not come up by

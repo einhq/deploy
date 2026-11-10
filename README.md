@@ -1,11 +1,17 @@
 # deploy
 
 EiN on one Linux machine with podman or Docker and their compose. The installer on
-[einhq.eu](https://einhq.eu) fetches this repository into `~/ein` and runs `setup.sh`:
+[einhq.eu](https://einhq.eu) asks how EiN is to be installed, fetches this repository into `~/ein`
+and runs `setup.sh` with the answers as its options:
 
 ```bash
-curl -fsSL https://einhq.eu/install.sh | bash
+curl -fsSL https://einhq.eu/install.sh | bash              # asks, each default shown
+curl -fsSL https://einhq.eu/install.sh | bash -s -- --yes  # the defaults, asking nothing
 ```
+
+`setup.sh` asks nothing. Every setting is an option of it, and the secrets come in the environment,
+off the command line: `INITIAL_ADMIN_PASSWORD`, the admin's first password at the install (made
+here when it is not given), and `EIN_SOURCE_KEY` (below).
 
 What is installed is EiN and its database. The media service, the assistant's language model, an
 MQTT broker and the modules are added to it with options, at the first install or any time after:
@@ -17,7 +23,12 @@ MQTT broker and the modules are added to it with options, at the first install o
 ./setup.sh --module archive   # a module, which EiN installs at its start with the modules it needs (archive needs ems)
 ./setup.sh                    # update: this folder and the newest images, pulled and restarted
 ./setup.sh --only ein         # update one service, ein, ems, db, llm or mqtt, and restart only it
+./setup.sh --http-port 8081   # the web interface's port; --ssh-port SSH and SFTP's
+./setup.sh --bind 127.0.0.1   # listen on this machine alone, behind an HTTPS proxy of your own
 ```
+
+At the first run only, when it writes `.env`: `--data DIR` names the data folder (default `./data`)
+and `--engine podman|docker` the container engine.
 
 The installer passes the same options on: `curl … | bash -s -- --ems --module archive`. An option
 chosen once is kept in `.env`; `--no-ems`, `--no-llm` and `--no-mqtt` leave one out again, and its
@@ -34,7 +45,7 @@ setup.sh              updates this folder, writes .env and compose.override.yaml
 src/                  the sources setup.sh fetches: ems and llm with their options, and core and db from your own
 .env                  the settings, with the passwords made at the install
 compose.override.yaml the options in .env as services, and podman's restart policy, written by setup.sh
-data/                 your files, the installed modules and the database, unless EIN_DATA named another folder at the install
+data/                 your files, the installed modules and the database, unless --data named another folder at the install
 ```
 
 The last four are made here and are not in the repository. Every run of `setup.sh` first brings this
@@ -54,7 +65,7 @@ elsewhere (below).
 
 ## Running it
 
-`setup.sh` picks podman when it is installed and Docker otherwise (`EIN_ENGINE=docker` picks
+`setup.sh` picks podman when it is installed and Docker otherwise (`--engine docker` picks
 Docker), and keeps the engine in `.env`: a later run uses it, whichever else is installed. After the
 install, compose works from this folder as usual, and with every compose: each reads
 `compose.override.yaml` beside `compose.yaml` on its own, so the options are always in.
@@ -82,8 +93,9 @@ EiN believes the forwarding headers of 10.0.2.2 too (`TRUSTED_PROXIES`, which ta
 EiN stays on the compose network: install `passt`, which has pasta.
 
 The admin account's first password is `INITIAL_ADMIN_PASSWORD` in `.env`, which EiN takes at its
-first start, and `setup.sh` shows it at the end of every run while that line is there. Sign in as
-`admin`, change the password, and delete the line.
+first start. One chosen at the install, `INITIAL_ADMIN_PASSWORD` in `setup.sh`'s environment, is
+removed from `.env` once EiN has answered. One made by `setup.sh` is shown at the end of every run
+while its line is there: sign in as `admin`, change the password, and delete the line.
 
 EiN starts again when the machine does, and `setup.sh` ends by saying whether it will. Docker's
 daemon starts it when Docker is enabled at boot. Under podman, `podman-restart.service` starts it,
@@ -102,8 +114,12 @@ source's own, below), into
 container is made again. `EIN_MODULES` in `.env` names the ones it installs at its start when they
 are missing, with the modules they need; `--module` adds one there. Settings → Modules in the web
 interface lists every published module, and installs, updates and removes them; `mod search` and
-`mod install` in EiN's shell do the same. `setup.sh` does not update a module: Settings → Modules
-does.
+`mod install` in EiN's shell do the same. A module is installed at its newest release that EiN's core can run, which is older than the newest
+published when the image is older than the module. At each start EiN replaces an installed module
+its core cannot run, as after an update that changed the module API, with the newest release it
+can. `setup.sh` ends by listing the installed modules, each with its version and release, and what
+EiN's start said of those it could not install or run. Otherwise `setup.sh` does not update a
+module: Settings → Modules does.
 
 ## Installing from your own Forgejo or Gitea
 
