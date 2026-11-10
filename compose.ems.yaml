@@ -1,7 +1,9 @@
 # The media service, every media tool and model behind one HTTP API, as an option: setup.sh --ems
 # names it in compose.override.yaml, with the graphics card when there is one. It mounts none of
 # EiN's folders: it mounts the files of each request from EiN's ems-files service with sshfs, for
-# which compose.override.yaml gives it /dev/fuse and this file SYS_ADMIN, the capability to mount.
+# which compose.override.yaml gives it /dev/fuse and this file SYS_ADMIN, the capability to mount,
+# and no AppArmor profile: Docker's docker-default, on Ubuntu and Debian, denies mount whatever the
+# capabilities, and every request that names a file would wait as files_unavailable.
 # It reads .env as its environment, so an EMS_ line added there reaches it at the next `up -d`.
 #
 # The image is the one GitHub publishes from ein/ems. From any source but GitHub's einhq,
@@ -12,6 +14,7 @@ services:
     restart: unless-stopped
     stop_grace_period: 60s
     cap_add: [SYS_ADMIN]
+    security_opt: [apparmor=unconfined]
     env_file: .env
     environment:
       EMS_PORT: 8181

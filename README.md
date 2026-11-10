@@ -185,7 +185,8 @@ file.
 
 The media service mounts none of EiN's folders: it reaches the files of each request through EiN's
 `ems-files` service, at `CFG_EMS_FILES_ADDRESS`, with an sshfs mount, for which its container has
-`/dev/fuse` and the `SYS_ADMIN` capability. `./setup.sh` writes the address: EiN's name on the
+`/dev/fuse`, the `SYS_ADMIN` capability and no AppArmor profile, since Docker's default one denies
+the mount. `./setup.sh` writes the address: EiN's name on the
 compose network, or, when EiN has a network of its own under rootless podman, this machine's address
 (`host.containers.internal`), where it publishes `CFG_EMS_FILES_PORT` (2224) on `EIN_BIND`. A media
 service on another machine is `CFG_EMS_FILES_ADDRESS` in `.env`, the `host:port` it reaches this
