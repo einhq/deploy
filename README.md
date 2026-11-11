@@ -216,9 +216,8 @@ nothing leaves it.
 Its restreamer, go2rtc, keeps one connection to each camera EiN has and serves it again: to EiN,
 which shows it in the browser, on `STREAMS_PORT` (1984), and over RTSP on `RTSP_PORT` (8554), where
 the media service reads it to watch it for faces, both behind the account `ein` and
-`STREAMS_PASSWORD`, and over WebRTC on `WEBRTC_PORT` (8555, TCP and UDP). A media service on
-another machine reads it at this machine's address on the network: set `CFG_AUTOMATION_STREAMS_RTSP`
-in `.env` to `rtsp://<this machine>:8554`. EiN gives it the cameras itself; the camera's own password stays with EiN and the sidecar.
+`STREAMS_PASSWORD`. A media service on another machine reads it at this machine's address on the
+network: set `CFG_AUTOMATION_STREAMS_RTSP` in `.env` to `rtsp://<this machine>:8554`. EiN gives it the cameras itself; the camera's own password stays with EiN and the sidecar.
 On this machine RTSP lets anyone in without a password, as go2rtc does for every local client. Keep
 these ports off the internet too.
 

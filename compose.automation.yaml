@@ -10,10 +10,9 @@
 #   Automation module to offer as devices;
 # - a restreamer (go2rtc) for cameras: one connection to each camera, served again to EiN's pages
 #   and to the media service. Its API is on STREAMS_PORT and its RTSP on RTSP_PORT, both of EIN_BIND
-#   behind the account `ein` and STREAMS_PASSWORD; WebRTC on WEBRTC_PORT, TCP and UDP.
+#   behind the account `ein` and STREAMS_PASSWORD.
 #
-# It is on the host's network: the listener's multicast never leaves the network it is sent on, and
-# WebRTC's media goes straight to the browser.
+# It is on the host's network: the listener's multicast never leaves the network it is sent on.
 services:
   automation:
     image: ${AUTOMATION_IMAGE:-ghcr.io/einhq/automation:main}
@@ -30,5 +29,4 @@ services:
       MQTT_DEVICE_PASSWORD: ${MQTT_DEVICE_PASSWORD}
       STREAMS_PORT: ${STREAMS_PORT:-1984}
       RTSP_PORT: ${RTSP_PORT:-8554}
-      WEBRTC_PORT: ${WEBRTC_PORT:-8555}
       STREAMS_PASSWORD: ${STREAMS_PASSWORD}

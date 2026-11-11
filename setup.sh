@@ -437,14 +437,13 @@ EIN_GPU=$gpu
 # The Automation module's sidecar, with setup.sh --automation, on this machine's own network: its
 # MQTT broker, on the port the devices on this network reach it on, of EIN_BIND, with the passwords
 # EiN (\`ein\`) and the devices (\`device\`) sign in with; and its restreamer for cameras, with
-# its API, its RTSP and its WebRTC (TCP and UDP) ports, and the password EiN signs in to it with.
+# its API and RTSP ports, and the password EiN signs in to it with.
 EIN_AUTOMATION=0
 MQTT_PORT=1883
 MQTT_EIN_PASSWORD=$(secret)
 MQTT_DEVICE_PASSWORD=$(secret 12)
 STREAMS_PORT=1984
 RTSP_PORT=8554
-WEBRTC_PORT=8555
 STREAMS_PASSWORD=$(secret)
 
 # The modules EiN installs at its start when it lacks them, with the modules they need, into the
@@ -551,7 +550,7 @@ automation_secrets() {
     set_env "$name" "$value"
     printf -v "$name" %s "$value"
   done
-  for name in MQTT_PORT=1883 STREAMS_PORT=1984 RTSP_PORT=8554 WEBRTC_PORT=8555; do
+  for name in MQTT_PORT=1883 STREAMS_PORT=1984 RTSP_PORT=8554; do
     value=${name#*=}
     name=${name%%=*}
     [ -z "${!name:-}" ] || continue
@@ -707,7 +706,7 @@ free_ports() {
   local name port was ours names=(EIN_HTTP_PORT EIN_SSH_PORT)
   if [ "$EIN_AUTOMATION" = 1 ] &&
     [ -z "$("$engine" ps -q --filter label=com.docker.compose.project=ein --filter label=com.docker.compose.service=automation)" ]; then
-    names+=(MQTT_PORT STREAMS_PORT RTSP_PORT WEBRTC_PORT)
+    names+=(MQTT_PORT STREAMS_PORT RTSP_PORT)
   fi
   [ -z "$ein_network" ] || names+=("${!loopback_ports[@]}")
   ours=$("$engine" ps --filter label=com.docker.compose.project=ein --format '{{.Ports}}')
