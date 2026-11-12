@@ -849,10 +849,16 @@ write_override() {
           ;;
         db) ! built || lines+=("image: $(image_of db)" "build: { context: src/db, dockerfile: Containerfile }") ;;
       esac
-      # The media service's port is on EIN_EMS_BIND, for a caller on another machine, or on loopback
-      # for EiN on a network of its own; its callers' keys beside EMS_KEY are in ems.keys.
+      # The media service's port is on loopback for EiN on a network of its own, and on EIN_EMS_BIND
+      # as well for a caller on another machine: 0.0.0.0 is both, and the port cannot be bound on it
+      # and on 127.0.0.1 together. Its callers' keys beside EMS_KEY are in ems.keys.
       if [ "$service" = ems ] && [ "$EIN_EMS" = 1 ] && { [ -n "$ein_network" ] || [ -n "${EIN_EMS_BIND:-}" ]; }; then
-        lines+=("ports: [\"\${EIN_EMS_BIND:-127.0.0.1}:$(loopback_port ems):8181\"]")
+        ems_ports=()
+        { [ -n "$ein_network" ] || [ "${EIN_EMS_BIND:-}" = 127.0.0.1 ]; } && [ "${EIN_EMS_BIND:-}" != 0.0.0.0 ] &&
+          ems_ports+=("\"127.0.0.1:$(loopback_port ems):8181\"")
+        [ -z "${EIN_EMS_BIND:-}" ] || [ "$EIN_EMS_BIND" = 127.0.0.1 ] ||
+          ems_ports+=("\"\${EIN_EMS_BIND}:$(loopback_port ems):8181\"")
+        lines+=("ports: [$(IFS=,; echo "${ems_ports[*]}")]")
       elif [ -n "$ein_network" ] && [ -n "${port_in[$service]:-}" ]; then
         lines+=("ports: [\"127.0.0.1:$(loopback_port "$service"):${port_in[$service]}\"]")
       fi
