@@ -466,6 +466,12 @@ EIN_BIND=0.0.0.0
 EIN_HTTP_PORT=8080
 EIN_SSH_PORT=2222
 
+# The media service, for EiN alone on 127.0.0.1. A caller on another machine reaches it with
+# EIN_EMS_BIND set to this machine's address on your network, at EIN_EMS_PORT (18181), and a key of
+# its own in ems.keys beside this file, a line \`<key> <name> [<weight>]\` (the weight is its share
+# when callers wait). It answers plain HTTP: only on a network you trust.
+# EIN_EMS_BIND=127.0.0.1
+
 # A hosted language model instead of --llm: its address (without /v1), key, name and model.
 # CFG_LLM_URL=https://api.openai.com
 # CFG_LLM_KEY=
@@ -843,8 +849,14 @@ write_override() {
           ;;
         db) ! built || lines+=("image: $(image_of db)" "build: { context: src/db, dockerfile: Containerfile }") ;;
       esac
-      [ -z "$ein_network" ] || [ -z "${port_in[$service]:-}" ] ||
+      # The media service's port is on EIN_EMS_BIND, for a caller on another machine, or on loopback
+      # for EiN on a network of its own; its callers' keys beside EMS_KEY are in ems.keys.
+      if [ "$service" = ems ] && [ "$EIN_EMS" = 1 ] && { [ -n "$ein_network" ] || [ -n "${EIN_EMS_BIND:-}" ]; }; then
+        lines+=("ports: [\"\${EIN_EMS_BIND:-127.0.0.1}:$(loopback_port ems):8181\"]")
+      elif [ -n "$ein_network" ] && [ -n "${port_in[$service]:-}" ]; then
         lines+=("ports: [\"127.0.0.1:$(loopback_port "$service"):${port_in[$service]}\"]")
+      fi
+      [ "$service" != ems ] || [ "$EIN_EMS" != 1 ] || [ ! -f ems.keys ] || lines+=("volumes: [\"./ems.keys:/etc/ems.keys:ro\"]")
       [ "$engine" != podman ] || lines+=("restart: always")
       [ ${#lines[@]} != 0 ] || continue
       echo "  $service:"

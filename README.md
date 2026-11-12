@@ -85,6 +85,14 @@ something else on the machine has one, `setup.sh` takes the next free port and s
 `EIN_BIND=127.0.0.1` in `.env` to keep them to the machine behind an HTTPS proxy of your own. The
 database, the media service and the model are reached only by EiN, on the compose network.
 
+A program on another machine that uses the media service, such as a scanning station, reaches it
+when `.env` sets `EIN_EMS_BIND` to this machine's address on your network (or `0.0.0.0`): the media
+service is then published there, at `EIN_EMS_PORT` (18181). It answers plain HTTP, so only on a
+network you trust. Give such a caller a key of its own in `ems.keys` beside `.env`, a line
+`<key> <name> [<weight>]`, which `setup.sh` mounts into the media service when the file is there;
+the weight is the caller's share when requests wait, and EiN keeps `EMS_KEY`. Run `./setup.sh` after
+either.
+
 Under rootless podman a port published on the compose network reaches EiN from an address of that
 network, so EiN would see every client as that one address. There EiN gets a network of its own
 instead, which keeps each client's address: pasta, or slirp4netns with its own port handler under
