@@ -10,7 +10,7 @@
 #                                 a listener for devices on the network, a restreamer for cameras
 #   ./setup.sh --module archive   also a module, which EiN installs at its start with the modules it needs
 #   ./setup.sh --no-ems --no-llm  leave an option out again (--no-automation too); its data stays
-#   ./setup.sh --only ein         update one service, ein, ems, db, llm or automation, and restart only it
+#   ./setup.sh --only core        update one service, core, ems, db, llm or automation, and restart only it
 #   ./setup.sh --source URL       fetch the sources and the modules from this organisation instead
 #   ./setup.sh --db-dir DIR       keep the database in this folder instead of db under the data folder
 #   ./setup.sh --http-port N      the web interface's port (default: 8080, or the next free one)
@@ -100,7 +100,7 @@ main() {
         shift
         ;;
       --only)
-        [ $# -ge 2 ] || fail "--only needs a service: ein, ems, db, llm or automation"
+        [ $# -ge 2 ] || fail "--only needs a service: core, ems, db, llm or automation"
         only=$2
         shift 2
         continue
@@ -190,7 +190,7 @@ main() {
   # one by one (start).
   if [ "$compose_tool" = podman-compose ]; then
     compose down --remove-orphans
-    start db automation ein ems llm
+    start db automation core ems llm
   else
     local recreate=()
     [ -z "$("$engine" ps -aq --filter label=com.docker.compose.project=ein)" ] || recreate=(--force-recreate)
@@ -208,7 +208,7 @@ main() {
 # restart the media service, the model or the database.
 update_one() {
   case $1 in
-    ein) ! built || fetch core src/core ;;
+    core) ! built || fetch core src/core ;;
     db) ! built || fetch db src/db ;;
     ems | llm)
       local option=EIN_${1^^}
@@ -220,7 +220,7 @@ update_one() {
       automation_secrets
       ! built || fetch module-automation src/module-automation
       ;;
-    *) fail "--only takes ein, ems, db, llm or automation, not $1" ;;
+    *) fail "--only takes core, ems, db, llm or automation, not $1" ;;
   esac
   step "Getting $1's image"
   local old
@@ -229,10 +229,10 @@ update_one() {
   [ "$1" != db ] || prepare_db_dir
   # EiN goes and comes back with the database: podman keeps a container that another requires, so
   # the one that requires it goes first.
-  if [ "$1" = db ]; then recreate ein db; else recreate "$1"; fi
+  if [ "$1" = db ]; then recreate core db; else recreate "$1"; fi
   case $1 in
     db) check_db_mount && wait_for_ein ;;
-    ein) wait_for_ein && modules_report ;;
+    core) wait_for_ein && modules_report ;;
   esac
   remove_replaced $old
 }
@@ -258,7 +258,7 @@ recreate() {
 # through a restart; a plain `podman compose up -d` that creates a container leaves it out.
 start() {
   local service mem
-  for service in db automation ein ems llm; do
+  for service in db automation core ems llm; do
     [[ " $* " == *" $service "* ]] || continue
     case $service in ems | llm | automation) local option=EIN_${service^^}; [ "${!option}" = 1 ] || continue ;; esac
     # The dry run writes its commands to stderr, the services this one needs too: 1.0 ignores --no-deps.
@@ -286,7 +286,7 @@ modules_report() {
   [ ${#lines[@]} != 0 ] || return 0
   echo "The modules installed:"
   printf '  %s\n' "${lines[@]}"
-  id=$("$engine" ps -q --filter label=com.docker.compose.project=ein --filter label=com.docker.compose.service=ein | head -1)
+  id=$("$engine" ps -q --filter label=com.docker.compose.project=ein --filter label=com.docker.compose.service=core | head -1)
   [ -n "$id" ] || return 0
   # Its log lines are "[time] [level] [component] text", the level coloured.
   "$engine" logs "$id" 2>&1 | sed -E 's/\x1b\[[0-9;]*m//g; s/^\[[^]]*\] \[[^]]*\] \[[^]]*\] //' |
@@ -640,13 +640,11 @@ built() {
   ! is_github "$EIN_SOURCE" || [ "${owner,,}" != einhq ]
 }
 
-# The image a service runs, ein, db, ems or automation: the one GitHub publishes from the repository
-# of that name (core for EiN, module-automation's sidecar for automation), as the compose files name
-# it, or the one built here.
+# The image a service runs, core, db, ems or automation: the one GitHub publishes from the repository
+# of that name (module-automation's sidecar for automation), as the compose files name it, or the
+# one built here.
 image_of() {
-  local repo=$1
-  [ "$repo" != ein ] || repo=core
-  if built; then echo "localhost/ein-$repo"; else echo "ghcr.io/einhq/$repo:main"; fi
+  if built; then echo "localhost/ein-$1"; else echo "ghcr.io/einhq/$1:main"; fi
 }
 
 # A Forgejo or a Gitea source is where EiN installs its modules from too, with its token: core's
@@ -768,7 +766,7 @@ write_override() {
     files_address=host.containers.internal:${CFG_EMS_FILES_PORT:-2224}
     files_published=1
   elif [ "$EIN_EMS" = 1 ]; then
-    files_address=ein:${CFG_EMS_FILES_PORT:-2224}
+    files_address=core:${CFG_EMS_FILES_PORT:-2224}
   fi
   if [ -n "$ein_network" ]; then
     reached=(db)
@@ -792,7 +790,7 @@ write_override() {
     echo "# Written by setup.sh from the options in .env and the container engine; edit those and run"
     echo "# setup.sh again."
     echo "services:"
-    for service in db automation ein ems llm; do
+    for service in db automation core ems llm; do
       lines=()
       case $service in
         automation)
@@ -812,8 +810,8 @@ write_override() {
           [ "$service" != ems ] || devices+=(/dev/fuse)
           [ ${#devices[@]} = 0 ] || lines+=("devices: [$(IFS=,; echo "${devices[*]}")]")
           ;;
-        ein)
-          ! built || lines+=("image: $(image_of ein)" "build: { context: src/core, dockerfile: src/Containerfile }")
+        core)
+          ! built || lines+=("image: $(image_of core)" "build: { context: src/core, dockerfile: src/Containerfile }")
           env=()
           [ "$EIN_LLM" != 1 ] || env+=("CFG_LLM_CARD: $([ "$EIN_GPU" = 1 ] && echo card || echo cpu)")
           if [ -n "$ein_network" ]; then
@@ -870,7 +868,7 @@ write_override() {
       written=1
     done
     # Never an empty services: docker-compose 1.x takes such a file for its old version 1 format.
-    [ "$written" = 1 ] || echo "  ein: {}"
+    [ "$written" = 1 ] || echo "  core: {}"
   } >compose.override.yaml
 }
 
@@ -913,7 +911,7 @@ add_modules() {
 # compose up pulls it.
 build() {
   local one=${1:-} service services=()
-  for service in ein db ems automation; do
+  for service in core db ems automation; do
     [ -z "$one" ] || [ "$one" = "$service" ] || continue
     [ "$service" != ems ] || [ "$EIN_EMS" = 1 ] || continue
     [ "$service" != automation ] || [ "$EIN_AUTOMATION" = 1 ] || continue
@@ -935,7 +933,7 @@ build() {
   for service in "${services[@]}"; do
     case $service in
       # What core's system-info says it runs, as a tree without its .git says it: the commit and its date.
-      ein) git -C src/core log -1 --format='{"commit":"%h","date":"%cI"}' >src/core/src/build.json ;;
+      core) git -C src/core log -1 --format='{"commit":"%h","date":"%cI"}' >src/core/src/build.json ;;
       # What the media service's health reports as its build, as its own Makefile writes it.
       ems) echo "$(git -C src/ems describe --always --dirty) $(git -C src/ems log -1 --format=%cI)" >src/ems/ems/BUILD ;;
     esac
@@ -1033,7 +1031,7 @@ wait_for_ein() {
     fi
     # A container that stopped, or that its engine restarts again and again, does not come up by
     # waiting longer.
-    id=$("$engine" ps -aq --filter label=com.docker.compose.project=ein --filter label=com.docker.compose.service=ein | head -1)
+    id=$("$engine" ps -aq --filter label=com.docker.compose.project=ein --filter label=com.docker.compose.service=core | head -1)
     if [ -z "$id" ] || [ "$("$engine" inspect --format '{{.State.Running}}' "$id")" != true ]; then
       down=$((down + 1))
     else
@@ -1041,7 +1039,7 @@ wait_for_ein() {
     fi
     if [ "$down" -ge 3 ] || { [ -n "$id" ] && [ "$("$engine" inspect --format '{{.RestartCount}}' "$id")" -ge 3 ]; }; then
       [ -z "$id" ] || "$engine" logs --tail 30 "$id" >&2 || true
-      fail "EiN stopped before it answered; its log is above: $engine compose logs ein"
+      fail "EiN stopped before it answered; its log is above: $engine compose logs core"
     fi
     # Every 10 seconds, what EiN last logged, when it is new.
     if [ -n "$id" ] && [ $((i % 5)) = 0 ]; then
@@ -1051,7 +1049,7 @@ wait_for_ein() {
     fi
     sleep 2
   done
-  fail "EiN did not answer at $url in 10 minutes: $engine compose logs ein"
+  fail "EiN did not answer at $url in 10 minutes: $engine compose logs core"
 }
 
 # Whether EiN starts again when the machine does, made so where this user may, and what it takes

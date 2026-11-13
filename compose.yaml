@@ -49,7 +49,7 @@ services:
   # originals, /old older originals, /files-volatile the renditions. `z` labels them shared
   # under SELinux and is ignored elsewhere. The media service reaches the files
   # of its requests at the ems-files port, CFG_EMS_FILES_ADDRESS, which setup.sh writes.
-  ein:
+  core:
     # Core's image with its web interface built in, which GitHub publishes for every commit on main.
     # From any source but GitHub's einhq, compose.override.yaml builds it here instead, as
     # localhost/ein-core from src/core.

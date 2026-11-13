@@ -24,7 +24,7 @@ any time after:
                               # a listener for devices on the network, a restreamer for cameras
 ./setup.sh --module archive   # a module, which EiN installs at its start with the modules it needs (archive needs ems)
 ./setup.sh                    # update: this folder and the newest images, pulled and restarted
-./setup.sh --only ein         # update one service, ein, ems, db, llm or automation, and restart only it
+./setup.sh --only core        # update one service, core, ems, db, llm or automation, and restart only it
 ./setup.sh --http-port 8081   # the web interface's port; --ssh-port SSH and SFTP's
 ./setup.sh --bind 127.0.0.1   # listen on this machine alone, behind an HTTPS proxy of your own
 ```
@@ -76,7 +76,7 @@ install, compose works from this folder as usual, and with every compose: each r
 
 ```bash
 podman compose ps               # or docker compose
-podman compose logs -f ein
+podman compose logs -f core
 podman compose down             # stop; `up -d` starts again
 ```
 
