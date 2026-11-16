@@ -1,5 +1,5 @@
-# The Automation module's sidecar, as an option: setup.sh --automation names it in
-# compose.override.yaml. One container, built from module-automation's sidecar/, with three
+# The Devices module's sidecar, as an option: setup.sh --devices names it in
+# compose.override.yaml. One container, built from module-devices's sidecar/, with three
 # services in it:
 #
 # - an MQTT broker (Mosquitto) for the devices, with no anonymous clients: EiN signs in as `ein` and
@@ -7,15 +7,15 @@
 #   on this machine's network reach it on MQTT_PORT of EIN_BIND; it keeps retained messages, such as
 #   the devices' announcements, in EIN_DATA/mqtt across restarts;
 # - a listener for what announces itself on this machine's network, published on the broker for the
-#   Automation module to offer as devices;
+#   Devices module to offer as devices;
 # - a restreamer (go2rtc) for cameras: one connection to each camera, served again to EiN's pages
 #   and to the media service. Its API is on STREAMS_PORT and its RTSP on RTSP_PORT, both of EIN_BIND
 #   behind the account `ein` and STREAMS_PASSWORD.
 #
 # It is on the host's network: the listener's multicast never leaves the network it is sent on.
 services:
-  automation:
-    image: ${AUTOMATION_IMAGE:-ghcr.io/einhq/automation:main}
+  devices:
+    image: ${DEVICES_IMAGE:-ghcr.io/einhq/devices:main}
     restart: unless-stopped
     network_mode: host
     mem_limit: 512m

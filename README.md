@@ -14,17 +14,17 @@ off the command line: `INITIAL_ADMIN_PASSWORD`, the admin's first password at th
 here when it is not given), and `EIN_SOURCE_KEY` (below).
 
 What is installed is EiN and its database. The media service, the assistant's language model, the
-Automation module's sidecar and the modules are added to it with options, at the first install or
+Devices module's sidecar and the modules are added to it with options, at the first install or
 any time after:
 
 ```bash
 ./setup.sh --ems              # the media service: every media tool and model, an image of about 30 GB
 ./setup.sh --llm              # the assistant's language model, Qwen3.5-4B in llama.cpp
-./setup.sh --automation       # the Automation module's sidecar: an MQTT broker for its devices on port 1883,
+./setup.sh --devices          # the Devices module's sidecar: an MQTT broker for its devices on port 1883,
                               # a listener for devices on the network, a restreamer for cameras
 ./setup.sh --module archive   # a module, which EiN installs at its start with the modules it needs (archive needs ems)
 ./setup.sh                    # update: this folder and the newest images, pulled and restarted
-./setup.sh --only core        # update one service, core, ems, db, llm or automation, and restart only it
+./setup.sh --only core        # update one service, core, ems, db, llm or devices, and restart only it
 ./setup.sh --http-port 8081   # the web interface's port; --ssh-port SSH and SFTP's
 ./setup.sh --bind 127.0.0.1   # listen on this machine alone, behind an HTTPS proxy of your own
 ```
@@ -33,7 +33,7 @@ At the first run only, when it writes `.env`: `--data DIR` names the data folder
 and `--engine podman|docker` the container engine.
 
 The installer passes the same options on: `curl … | bash -s -- --ems --module archive`. An option
-chosen once is kept in `.env`; `--no-ems`, `--no-llm` and `--no-automation` leave one out again, and
+chosen once is kept in `.env`; `--no-ems`, `--no-llm` and `--no-devices` leave one out again, and
 its data stays.
 `./setup.sh --help` lists everything.
 
@@ -41,11 +41,11 @@ its data stays.
 compose.yaml            EiN and PostgreSQL: the base every install runs
 compose.ems.yaml        the media service, which --ems adds
 compose.llm.yaml        the language model, which --llm adds
-compose.automation.yaml the Automation module's sidecar, which --automation adds
+compose.devices.yaml    the Devices module's sidecar, which --devices adds
 setup.sh                updates this folder, writes .env and compose.override.yaml, pulls or builds the images, starts
 
 src/                    the sources setup.sh fetches: ems and llm with their options, and core, db and
-                        module-automation from your own
+                        module-devices from your own
 .env                    the settings, with the passwords made at the install
 compose.override.yaml   the options in .env as services, and podman's restart policy, written by setup.sh
 data/                   your files, the installed modules and the database, unless --data named another folder at the install
@@ -60,14 +60,14 @@ a second waits for the first to end, under `flock` on this folder.
 The images are pulled: GitHub builds them once a day from the `main` of their repositories, when it
 has moved since the last build, EiN's as `ghcr.io/einhq/core:main` with the web interface built in,
 the database's as `ghcr.io/einhq/db:main` (and again every week, for PostgreSQL's minor releases)
-and the media service's as `ghcr.io/einhq/ems`; the automation sidecar's, `ghcr.io/einhq/automation`,
-is built when its folder in module-automation changes. From another source they are built here
+and the media service's as `ghcr.io/einhq/ems`; the devices sidecar's, `ghcr.io/einhq/devices`,
+is built when its folder in module-devices changes. From another source they are built here
 instead (below). The model's is llama.cpp's own.
 
 The media service and the sidecar are tagged with the version of what they offer EiN and with its
 line (`ems:0.4.4` and `ems:0.4`, the newest of the 0.4 versions), and pulled at the line the modules
 installed in the data folder ask for in their `mod.json` (`"services": { "ems": "^0.4.4" }`), kept in
-`.env` as `EIN_EMS_TAG` and `EIN_AUTOMATION_TAG`; `:main` until a module asks. A run after EiN
+`.env` as `EIN_EMS_TAG` and `EIN_DEVICES_TAG`; `:main` until a module asks. A run after EiN
 comes up pulls a line its modules ask for then, and restarts that service; a line not published yet
 leaves the service at the one it has. `./setup.sh --only ems` is the update after a module's, when
 EiN's Status page says the media service is too old for it.
@@ -159,9 +159,9 @@ curl -fsSL -H "Authorization: token $K" 'http://forge.example:3000/api/v1/repos/
 `--source` again moves an installation to another. A source on another host, such as GitHub again,
 drops the token, unless `EIN_SOURCE_KEY` gives a new one with it. git gets the token as a header for
 each call, so it is in no `.git/config`. From any source but GitHub's `einhq`, the images of EiN,
-the database, the media service and the automation sidecar are built here from the sources of core,
-db, ems and module-automation, as `localhost/ein-core`, `localhost/ein-db`, `localhost/ein-ems` and
-`localhost/ein-automation`, since the published images have none of their own commits. The media service's build fetches its wheels and models for about an
+the database, the media service and the devices sidecar are built here from the sources of core,
+db, ems and module-devices, as `localhost/ein-core`, `localhost/ein-db`, `localhost/ein-ems` and
+`localhost/ein-devices`, since the published images have none of their own commits. The media service's build fetches its wheels and models for about an
 hour. From a Forgejo or a Gitea, EiN installs its modules from there too: setup.sh writes
 `CFG_MODULE_SOURCES` and `CFG_MODULE_SOURCES_KEY` into `.env` for it, and Settings → Modules lists
 that organisation's modules.
@@ -215,7 +215,7 @@ echo 'ACTION=="add", SUBSYSTEM=="bdi", KERNEL=="0:*", RUN+="/bin/sh -c '\''sleep
 sudo udevadm control --reload
 ```
 
-`--automation` runs the Automation module's sidecar, one container on this machine's own network
+`--devices` runs the Devices module's sidecar, one container on this machine's own network
 with three services in it. Its broker takes no anonymous clients. EiN signs in as `ein` and the
 devices as `device`, with the passwords `MQTT_EIN_PASSWORD` and `MQTT_DEVICE_PASSWORD` that
 `./setup.sh` made in `.env`; give a device the broker's address (this machine, port `MQTT_PORT`,
@@ -224,7 +224,7 @@ devices as `device`, with the passwords `MQTT_EIN_PASSWORD` and `MQTT_DEVICE_PAS
 
 Its listener asks what is on the network every two minutes over mDNS and SSDP, hears mDNS
 announcements in between on port 5353 beside any responder already there such as Avahi, and
-publishes the answers on the broker, where the Automation module names them and offers the ones it
+publishes the answers on the broker, where the Devices module names them and offers the ones it
 can take as devices (Devices → _found_). A Shelly is added from there: EiN gives it the broker's
 address and the `device` account itself. It sends multicast on the network this machine is on, and
 nothing leaves it.
@@ -233,7 +233,7 @@ Its restreamer, go2rtc, keeps one connection to each camera EiN has and serves i
 which shows it in the browser, on `STREAMS_PORT` (1984), and over RTSP on `RTSP_PORT` (8554), where
 the media service reads it to watch it for faces, both behind the account `ein` and
 `STREAMS_PASSWORD`. A media service on another machine reads it at this machine's address on the
-network: set `CFG_AUTOMATION_STREAMS_RTSP` in `.env` to `rtsp://<this machine>:8554`. EiN gives it the cameras itself; the camera's own password stays with EiN and the sidecar.
+network: set `CFG_DEVICES_STREAMS_RTSP` in `.env` to `rtsp://<this machine>:8554`. EiN gives it the cameras itself; the camera's own password stays with EiN and the sidecar.
 On this machine RTSP lets anyone in without a password, as go2rtc does for every local client. Keep
 these ports off the internet too.
 

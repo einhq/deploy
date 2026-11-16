@@ -6,11 +6,11 @@
 #   ./setup.sh                    EiN and its database; run again, the newest sources of what is here
 #   ./setup.sh --ems              also the media service: every media tool and model, about 30 GB
 #   ./setup.sh --llm              also the assistant's language model
-#   ./setup.sh --automation       also the Automation module's sidecar: an MQTT broker for its devices,
+#   ./setup.sh --devices          also the Devices module's sidecar: an MQTT broker for its devices,
 #                                 a listener for devices on the network, a restreamer for cameras
 #   ./setup.sh --module archive   also a module, which EiN installs at its start with the modules it needs
-#   ./setup.sh --no-ems --no-llm  leave an option out again (--no-automation too); its data stays
-#   ./setup.sh --only core        update one service, core, ems, db, llm or automation, and restart only it
+#   ./setup.sh --no-ems --no-llm  leave an option out again (--no-devices too); its data stays
+#   ./setup.sh --only core        update one service, core, ems, db, llm or devices, and restart only it
 #   ./setup.sh --source URL       fetch the sources and the modules from this organisation instead
 #   ./setup.sh --db-dir DIR       keep the database in this folder instead of db under the data folder
 #   ./setup.sh --http-port N      the web interface's port (default: 8080, or the next free one)
@@ -44,7 +44,7 @@
 #
 # The media service and the sidecar are pulled at the version line the installed modules ask for in
 # their mod.json (`"services": { "ems": "^0.4.4" }`: the line 0.4, the image ghcr.io/einhq/ems:0.4),
-# kept in .env as EIN_EMS_TAG and EIN_AUTOMATION_TAG, and :main before any module asks. A run after
+# kept in .env as EIN_EMS_TAG and EIN_DEVICES_TAG, and :main before any module asks. A run after
 # a module's update in EiN pulls the line it asks for then.
 #
 # The secrets come in the environment, every other setting as an option. setup.sh asks nothing:
@@ -55,7 +55,7 @@ here=$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)
 cd "$here"
 
 main() {
-  local args=("$@") want_ems= want_llm= want_automation= modules=() source= db_dir= only= key=${EIN_SOURCE_KEY:-} options=0 unknown=
+  local args=("$@") want_ems= want_llm= want_devices= modules=() source= db_dir= only= key=${EIN_SOURCE_KEY:-} options=0 unknown=
   local http_port= ssh_port= bind=
   data_dir= want_engine=
   while [ $# -gt 0 ]; do
@@ -64,8 +64,8 @@ main() {
       --no-ems) want_ems=0 ;;
       --llm) want_llm=1 ;;
       --no-llm) want_llm=0 ;;
-      --automation) want_automation=1 ;;
-      --no-automation) want_automation=0 ;;
+      --devices) want_devices=1 ;;
+      --no-devices) want_devices=0 ;;
       --module)
         [ $# -ge 2 ] || fail "--module needs a name, such as archive"
         modules+=("$2")
@@ -105,7 +105,7 @@ main() {
         shift
         ;;
       --only)
-        [ $# -ge 2 ] || fail "--only needs a service: core, ems, db, llm or automation"
+        [ $# -ge 2 ] || fail "--only needs a service: core, ems, db, llm or devices"
         only=$2
         shift 2
         continue
@@ -154,22 +154,22 @@ main() {
   [ -z "$bind" ] || set_env EIN_BIND "$bind"
   [ -z "$want_ems" ] || set_env EIN_EMS "$want_ems"
   [ -z "$want_llm" ] || set_env EIN_LLM "$want_llm"
-  [ -z "$want_automation" ] || set_env EIN_AUTOMATION "$want_automation"
+  [ -z "$want_devices" ] || set_env EIN_DEVICES "$want_devices"
   [ ${#modules[@]} = 0 ] || add_modules "${modules[@]}"
   [ -z "$source" ] || set_source "$source"
   [ -z "$key" ] || set_env EIN_SOURCE_KEY "$key"
   [ -z "$db_dir" ] || set_db_dir "$db_dir"
   load_env
   module_sources
-  [ "$EIN_AUTOMATION" != 1 ] || automation_secrets
-  check_automation_bind
+  [ "$EIN_DEVICES" != 1 ] || devices_secrets
+  check_devices_bind
   write_override
 
   # The media service's source comes with its image too: its deploy/ has the fix for the card's CDI
   # spec under podman before 5.
   local repo repos=()
   ! built || repos+=(core db)
-  ! built || [ "$EIN_AUTOMATION" != 1 ] || repos+=(module-automation)
+  ! built || [ "$EIN_DEVICES" != 1 ] || repos+=(module-devices)
   [ "$EIN_EMS" != 1 ] || repos+=(ems)
   [ "$EIN_LLM" != 1 ] || repos+=(llm)
   [ ${#repos[@]} = 0 ] || step "Fetching the sources"
@@ -195,7 +195,7 @@ main() {
   # one by one (start).
   if [ "$compose_tool" = podman-compose ]; then
     compose down --remove-orphans
-    start db automation core ems llm
+    start db devices core ems llm
   else
     local recreate=()
     [ -z "$("$engine" ps -aq --filter label=com.docker.compose.project=ein)" ] || recreate=(--force-recreate)
@@ -222,12 +222,12 @@ update_one() {
       [ "${!option}" = 1 ] || fail "$1 is not installed here: ./setup.sh --$1 adds it"
       fetch "$1" "src/$1"
       ;;
-    automation)
-      [ "$EIN_AUTOMATION" = 1 ] || fail "automation is not installed here: ./setup.sh --automation adds it"
-      automation_secrets
-      ! built || fetch module-automation src/module-automation
+    devices)
+      [ "$EIN_DEVICES" = 1 ] || fail "the devices sidecar is not installed here: ./setup.sh --devices adds it"
+      devices_secrets
+      ! built || fetch module-devices src/module-devices
       ;;
-    *) fail "--only takes core, ems, db, llm or automation, not $1" ;;
+    *) fail "--only takes core, ems, db, llm or devices, not $1" ;;
   esac
   step "Getting $1's image"
   local old
@@ -266,9 +266,9 @@ recreate() {
 # through a restart; a plain `podman compose up -d` that creates a container leaves it out.
 start() {
   local service mem
-  for service in db automation core ems llm; do
+  for service in db devices core ems llm; do
     [[ " $* " == *" $service "* ]] || continue
-    case $service in ems | llm | automation) local option=EIN_${service^^}; [ "${!option}" = 1 ] || continue ;; esac
+    case $service in ems | llm | devices) local option=EIN_${service^^}; [ "${!option}" = 1 ] || continue ;; esac
     # The dry run writes its commands to stderr, the services this one needs too: 1.0 ignores --no-deps.
     mem=$(compose --dry-run up -d --no-deps "$service" 2>&1 |
       sed -n "/^podman run .* --label com.docker.compose.service=$service /s/.* -m \([^ ]*\) .*/\1/p" | tail -1)
@@ -310,8 +310,8 @@ json_field() { [ ! -f "$2" ] || sed -n "s/^ *\"$1\": *\"\([^\"]*\)\".*/\1/p" "$2
 # service, which the ems module, which it needs, talks to.
 modules_need() {
   local service option module
-  local -A what=([ems]="the media service" [automation]="the automation sidecar" [llm]="the language model")
-  for service in ems automation llm; do
+  local -A what=([ems]="the media service" [devices]="the devices sidecar" [llm]="the language model")
+  for service in ems devices llm; do
     option=EIN_${service^^}
     [ "${!option:-0}" != 1 ] || continue
     for module in $(modules_asking "$service"); do
@@ -360,7 +360,7 @@ wanted_line() {
 source_version() {
   case $1 in
     ems) [ ! -f src/ems/ems/__init__.py ] || sed -n 's/^API_VERSION = "\([0-9.]*\)"$/\1/p' src/ems/ems/__init__.py ;;
-    automation) [ ! -f src/module-automation/sidecar/discovery.ts ] || sed -n "s/^export const VERSION = '\([0-9.]*\)';$/\1/p" src/module-automation/sidecar/discovery.ts ;;
+    devices) [ ! -f src/module-devices/sidecar/discovery.ts ] || sed -n "s/^export const VERSION = '\([0-9.]*\)';$/\1/p" src/module-devices/sidecar/discovery.ts ;;
   esac
 }
 
@@ -369,7 +369,7 @@ source_version() {
 # and what the modules ask for are only compared.
 follow_lines() {
   local service option line version
-  for service in ems automation; do
+  for service in ems devices; do
     option=EIN_${service^^}
     [ "${!option:-0}" = 1 ] || continue
     line=$(wanted_line "$service")
@@ -412,7 +412,7 @@ pull_service() {
 drop_main_tags() {
   local service option
   built && return 0
-  for service in ems automation; do
+  for service in ems devices; do
     option=EIN_${service^^}_TAG
     [ -n "${!option:-}" ] && [ "${!option}" != main ] || continue
     "$engine" image inspect "ghcr.io/einhq/$service:main" >/dev/null 2>&1 || continue
@@ -549,11 +549,11 @@ EIN_EMS=0
 EIN_LLM=0
 EIN_GPU=$gpu
 
-# The Automation module's sidecar, with setup.sh --automation, on this machine's own network: its
+# The Devices module's sidecar, with setup.sh --devices, on this machine's own network: its
 # MQTT broker, on the port the devices on this network reach it on, of EIN_BIND, with the passwords
 # EiN (\`ein\`) and the devices (\`device\`) sign in with; and its restreamer for cameras, with
 # its API and RTSP ports, and the password EiN signs in to it with.
-EIN_AUTOMATION=0
+EIN_DEVICES=0
 MQTT_PORT=1883
 MQTT_EIN_PASSWORD=$(secret)
 MQTT_DEVICE_PASSWORD=$(secret 12)
@@ -653,7 +653,7 @@ unset_env() { sed -i "/^$1=/d" .env; }
 load_env() {
   # shellcheck disable=SC1091
   set -a && . ./.env && set +a
-  : "${EIN_AUTOMATION:=0}"
+  : "${EIN_DEVICES:=0}"
   [ -n "${EIN_HOSTNAME:-}" ] || { EIN_HOSTNAME=$(machine_name); set_env EIN_HOSTNAME "$EIN_HOSTNAME"; export EIN_HOSTNAME; }
 }
 
@@ -663,7 +663,7 @@ machine_name() { local name; name=$(uname -n); echo "${name%%.*}"; }
 # The sidecar's passwords and ports, kept in .env, made the first time where an older .env lacks
 # them. The sidecar hashes the broker's passwords itself, into its data folder EIN_DATA/mqtt, which
 # keeps the broker's retained messages too.
-automation_secrets() {
+devices_secrets() {
   local name value
   for name in MQTT_EIN_PASSWORD MQTT_DEVICE_PASSWORD STREAMS_PASSWORD; do
     [ -z "${!name:-}" ] || continue
@@ -684,9 +684,9 @@ automation_secrets() {
 # The sidecar is on this machine's own network, and EiN on the compose network reaches it at this
 # machine's address on that network, never at its loopback: listening on 127.0.0.1 alone, it would be
 # out of EiN's reach there.
-check_automation_bind() {
-  [ "$EIN_AUTOMATION" = 1 ] && [ -z "$ein_network" ] && [ "${EIN_BIND:-0.0.0.0}" = 127.0.0.1 ] || return 0
-  fail "--automation listens on EIN_BIND, 127.0.0.1 here, where EiN's container cannot reach it under $engine: set EIN_BIND=0.0.0.0, or leave the sidecar out with --no-automation"
+check_devices_bind() {
+  [ "$EIN_DEVICES" = 1 ] && [ -z "$ein_network" ] && [ "${EIN_BIND:-0.0.0.0}" = 127.0.0.1 ] || return 0
+  fail "--devices listens on EIN_BIND, 127.0.0.1 here, where EiN's container cannot reach it under $engine: set EIN_BIND=0.0.0.0, or leave the sidecar out with --no-devices"
 }
 
 # One run in this folder at a time: this script runs again under flock, which holds a lock on the
@@ -755,16 +755,16 @@ built() {
   ! is_github "$EIN_SOURCE" || [ "${owner,,}" != einhq ]
 }
 
-# The image a service runs, core, db, ems or automation: the one GitHub publishes from the repository
-# of that name (module-automation's sidecar for automation), at the line its modules ask for (the
-# media service and the sidecar, EIN_EMS_TAG and EIN_AUTOMATION_TAG) or :main, or the one built here.
+# The image a service runs, core, db, ems or devices: the one GitHub publishes from the repository
+# of that name (module-devices's sidecar for devices), at the line its modules ask for (the
+# media service and the sidecar, EIN_EMS_TAG and EIN_DEVICES_TAG) or :main, or the one built here.
 image_of() {
   if built; then echo "localhost/ein-$1"; else echo "ghcr.io/einhq/$1:$(tag_of "$1")"; fi
 }
 tag_of() {
   case $1 in
     ems) echo "${EIN_EMS_TAG:-main}" ;;
-    automation) echo "${EIN_AUTOMATION_TAG:-main}" ;;
+    devices) echo "${EIN_DEVICES_TAG:-main}" ;;
     *) echo main ;;
   esac
 }
@@ -830,8 +830,8 @@ check_db_mount() {
 # network, are its own while it runs.
 free_ports() {
   local name port was ours names=(EIN_HTTP_PORT EIN_SSH_PORT)
-  if [ "$EIN_AUTOMATION" = 1 ] &&
-    [ -z "$("$engine" ps -q --filter label=com.docker.compose.project=ein --filter label=com.docker.compose.service=automation)" ]; then
+  if [ "$EIN_DEVICES" = 1 ] &&
+    [ -z "$("$engine" ps -q --filter label=com.docker.compose.project=ein --filter label=com.docker.compose.service=devices)" ]; then
     names+=(MQTT_PORT STREAMS_PORT RTSP_PORT)
   fi
   [ -z "$ein_network" ] || names+=("${!loopback_ports[@]}")
@@ -868,15 +868,15 @@ port_taken() {
 # from there too under slirp4netns, so EiN believes its forwarding headers (TRUSTED_PROXIES), and
 # those of any proxy .env names in TRUSTED_PROXIES.
 #
-# The automation sidecar is on this machine's own network, listening on its ports itself. EiN with a
+# The devices sidecar is on this machine's own network, listening on its ports itself. EiN with a
 # network of its own reaches it at this machine's loopback as it reaches the others; on the compose
 # network, at this machine's address there: host.containers.internal under podman, the name
-# automation as host-gateway under Docker. The media service, always on the compose network, reads
+# devices as host-gateway under Docker. The media service, always on the compose network, reads
 # the cameras' streams at the sidecar's RTSP the same way, which EiN tells it
-# (CFG_AUTOMATION_STREAMS_RTSP).
+# (CFG_DEVICES_STREAMS_RTSP).
 write_override() {
   local service option lines env devices written=0 reached=() hosts=() forwards=() files_address files_published=
-  local automation_host=automation
+  local devices_host=devices
   local -A port_in=([db]=5432 [ems]=8181 [llm]=8190)
   # The media service reaches the files of its requests at EiN's ems-files port: by EiN's name on
   # the compose network, or, with EiN on a network of its own, at this machine's address, where the
@@ -894,32 +894,32 @@ write_override() {
     reached=(db)
     [ "$EIN_EMS" != 1 ] || reached+=(ems)
     [ "$EIN_LLM" != 1 ] || reached+=(llm)
-    [ "$EIN_AUTOMATION" != 1 ] || reached+=(automation)
+    [ "$EIN_DEVICES" != 1 ] || reached+=(devices)
     for service in "${reached[@]}"; do
       hosts+=("\"$service:$([ "$ein_network" = pasta ] && echo 127.0.0.1 || echo 10.0.2.2)\"")
-      if [ "$service" = automation ]; then
+      if [ "$service" = devices ]; then
         forwards+=("-T,\${MQTT_PORT:-1883}" "-T,\${STREAMS_PORT:-1984}")
       else
         forwards+=("-T,$(loopback_port "$service")")
       fi
     done
-  elif [ "$EIN_AUTOMATION" = 1 ] && [ "$engine" = docker ]; then
-    hosts+=("\"automation:host-gateway\"")
-  elif [ "$EIN_AUTOMATION" = 1 ]; then
-    automation_host=host.containers.internal
+  elif [ "$EIN_DEVICES" = 1 ] && [ "$engine" = docker ]; then
+    hosts+=("\"devices:host-gateway\"")
+  elif [ "$EIN_DEVICES" = 1 ]; then
+    devices_host=host.containers.internal
   fi
   {
     echo "# Written by setup.sh from the options in .env and the container engine; edit those and run"
     echo "# setup.sh again."
     echo "services:"
-    for service in db automation core ems llm; do
+    for service in db devices core ems llm; do
       lines=()
       case $service in
-        automation)
-          [ "$EIN_AUTOMATION" = 1 ] || continue
-          lines+=("extends: { file: compose.automation.yaml, service: automation }")
-          lines+=("image: $(image_of automation)")
-          ! built || lines+=("build: { context: src/module-automation/sidecar, dockerfile: Containerfile }")
+        devices)
+          [ "$EIN_DEVICES" = 1 ] || continue
+          lines+=("extends: { file: compose.devices.yaml, service: devices }")
+          lines+=("image: $(image_of devices)")
+          ! built || lines+=("build: { context: src/module-devices/sidecar, dockerfile: Containerfile }")
           ;;
         ems | llm)
           option=EIN_${service^^}
@@ -927,7 +927,7 @@ write_override() {
           lines+=("extends: { file: compose.$service.yaml, service: $service }")
           [ "$service" = llm ] || lines+=("image: $(image_of ems)")
           [ "$service" = llm ] || ! built || lines+=("build: { context: src/ems, dockerfile: Containerfile }")
-          [ "$service" != ems ] || [ "$EIN_AUTOMATION" != 1 ] || [ "$engine" != docker ] || lines+=("extra_hosts: [\"automation:host-gateway\"]")
+          [ "$service" != ems ] || [ "$EIN_DEVICES" != 1 ] || [ "$engine" != docker ] || lines+=("extra_hosts: [\"devices:host-gateway\"]")
           devices=()
           [ "$EIN_GPU" != 1 ] || devices+=(nvidia.com/gpu=all)
           # The media service mounts the files of a request with sshfs (ems-files).
@@ -951,18 +951,18 @@ write_override() {
             [ "$EIN_LLM" != 1 ] || [ -n "${CFG_LLM_URL:-}" ] || env+=("CFG_LLM_URL: http://llm:$(loopback_port llm)")
           fi
           [ ${#hosts[@]} = 0 ] || lines+=("extra_hosts: [$(IFS=,; echo "${hosts[*]}")]")
-          if [ "$EIN_AUTOMATION" = 1 ] && [ -z "${CFG_AUTOMATION_MQTT_URL:-}" ]; then
-            env+=("CFG_AUTOMATION_MQTT_URL: mqtt://$automation_host:\${MQTT_PORT:-1883}")
-            env+=("CFG_AUTOMATION_MQTT_USER: ein" "CFG_AUTOMATION_MQTT_KEY: \${MQTT_EIN_PASSWORD}")
+          if [ "$EIN_DEVICES" = 1 ] && [ -z "${CFG_DEVICES_MQTT_URL:-}" ]; then
+            env+=("CFG_DEVICES_MQTT_URL: mqtt://$devices_host:\${MQTT_PORT:-1883}")
+            env+=("CFG_DEVICES_MQTT_USER: ein" "CFG_DEVICES_MQTT_KEY: \${MQTT_EIN_PASSWORD}")
             # What a device added from the network signs in with.
-            env+=("CFG_AUTOMATION_DEVICE_USER: device" "CFG_AUTOMATION_DEVICE_KEY: \${MQTT_DEVICE_PASSWORD}")
+            env+=("CFG_DEVICES_DEVICE_USER: device" "CFG_DEVICES_DEVICE_KEY: \${MQTT_DEVICE_PASSWORD}")
           fi
-          if [ "$EIN_AUTOMATION" = 1 ] && [ -z "${CFG_AUTOMATION_STREAMS_URL:-}" ]; then
-            env+=("CFG_AUTOMATION_STREAMS_URL: http://$automation_host:\${STREAMS_PORT:-1984}")
-            env+=("CFG_AUTOMATION_STREAMS_KEY: \${STREAMS_PASSWORD}")
+          if [ "$EIN_DEVICES" = 1 ] && [ -z "${CFG_DEVICES_STREAMS_URL:-}" ]; then
+            env+=("CFG_DEVICES_STREAMS_URL: http://$devices_host:\${STREAMS_PORT:-1984}")
+            env+=("CFG_DEVICES_STREAMS_KEY: \${STREAMS_PASSWORD}")
           fi
-          if [ "$EIN_AUTOMATION" = 1 ] && [ -z "${CFG_AUTOMATION_STREAMS_RTSP:-}" ]; then
-            env+=("CFG_AUTOMATION_STREAMS_RTSP: rtsp://$([ "$engine" = docker ] && echo automation || echo host.containers.internal):\${RTSP_PORT:-8554}")
+          if [ "$EIN_DEVICES" = 1 ] && [ -z "${CFG_DEVICES_STREAMS_RTSP:-}" ]; then
+            env+=("CFG_DEVICES_STREAMS_RTSP: rtsp://$([ "$engine" = docker ] && echo devices || echo host.containers.internal):\${RTSP_PORT:-8554}")
           fi
           [ -z "$files_address" ] || [ -n "${CFG_EMS_FILES_ADDRESS:-}" ] || env+=("CFG_EMS_FILES_ADDRESS: $files_address")
           [ ${#env[@]} = 0 ] || lines+=("environment:" "${env[@]/#/  }")
@@ -1031,14 +1031,14 @@ add_modules() {
 }
 
 # Every image, or the one service's when one is named: EiN's, the database's, the media service's
-# and the automation sidecar's pulled, or built from their sources (built). The model's is neither:
+# and the devices sidecar's pulled, or built from their sources (built). The model's is neither:
 # compose up pulls it.
 build() {
   local one=${1:-} service services=()
-  for service in core db ems automation; do
+  for service in core db ems devices; do
     [ -z "$one" ] || [ "$one" = "$service" ] || continue
     [ "$service" != ems ] || [ "$EIN_EMS" = 1 ] || continue
-    [ "$service" != automation ] || [ "$EIN_AUTOMATION" = 1 ] || continue
+    [ "$service" != devices ] || [ "$EIN_DEVICES" = 1 ] || continue
     services+=("$service")
   done
   [ ${#services[@]} != 0 ] || return 0
@@ -1052,7 +1052,7 @@ build() {
   if ! built; then
     for service in "${services[@]}"; do
       case $service in
-        ems | automation) pull_service "$service" || true ;;
+        ems | devices) pull_service "$service" || true ;;
         *) "$engine" pull "$(image_of "$service")" ;;
       esac
     done
@@ -1111,7 +1111,7 @@ podman_compose_build() {
 # The ids of the images build tags or pull.
 built_images() {
   local repo name
-  for repo in core db ems automation; do
+  for repo in core db ems devices; do
     for name in "localhost/ein-$repo" "ghcr.io/einhq/$repo:main" "ghcr.io/einhq/$repo:$(tag_of "$repo")"; do
       "$engine" image inspect --format '{{.Id}}' "$name" 2>/dev/null || true
     done
