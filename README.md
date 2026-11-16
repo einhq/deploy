@@ -60,9 +60,17 @@ a second waits for the first to end, under `flock` on this folder.
 The images are pulled: GitHub builds them once a day from the `main` of their repositories, when it
 has moved since the last build, EiN's as `ghcr.io/einhq/core:main` with the web interface built in,
 the database's as `ghcr.io/einhq/db:main` (and again every week, for PostgreSQL's minor releases)
-and the media service's as `ghcr.io/einhq/ems:main`; the automation sidecar's, `ghcr.io/einhq/automation:main`,
+and the media service's as `ghcr.io/einhq/ems`; the automation sidecar's, `ghcr.io/einhq/automation`,
 is built when its folder in module-automation changes. From another source they are built here
 instead (below). The model's is llama.cpp's own.
+
+The media service and the sidecar are tagged with the version of what they offer EiN and with its
+line (`ems:0.4.4` and `ems:0.4`, the newest of the 0.4 versions), and pulled at the line the modules
+installed in the data folder ask for in their `mod.json` (`"services": { "ems": "^0.4.4" }`), kept in
+`.env` as `EIN_EMS_TAG` and `EIN_AUTOMATION_TAG`; `:main` until a module asks. A run after EiN
+comes up pulls a line its modules ask for then, and restarts that service; a line not published yet
+leaves the service at the one it has. `./setup.sh --only ems` is the update after a module's, when
+EiN's Status page says the media service is too old for it.
 
 Back up `.env` and the data folder, which holds the database too, unless `--db-dir` put it
 elsewhere (below).

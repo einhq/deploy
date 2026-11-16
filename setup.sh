@@ -42,6 +42,11 @@
 # environment is the token that reads the source, when its repositories are private; it is kept in
 # .env with the source, and a --source on another host without a token of its own drops it.
 #
+# The media service and the sidecar are pulled at the version line the installed modules ask for in
+# their mod.json (`"services": { "ems": "^0.4.4" }`: the line 0.4, the image ghcr.io/einhq/ems:0.4),
+# kept in .env as EIN_EMS_TAG and EIN_AUTOMATION_TAG, and :main before any module asks. A run after
+# a module's update in EiN pulls the line it asks for then.
+#
 # The secrets come in the environment, every other setting as an option. setup.sh asks nothing:
 # the installer asks, and passes the answers on.
 set -euo pipefail
@@ -198,6 +203,8 @@ main() {
   fi
   check_db_mount
   wait_for_ein
+  follow_lines
+  drop_main_tags
   remove_replaced $old
   after_reboot
   modules_report
@@ -234,6 +241,7 @@ update_one() {
     db) check_db_mount && wait_for_ein ;;
     core) wait_for_ein && modules_report ;;
   esac
+  drop_main_tags
   remove_replaced $old
 }
 
@@ -297,12 +305,119 @@ modules_report() {
 # file or the field is not there.
 json_field() { [ ! -f "$2" ] || sed -n "s/^ *\"$1\": *\"\([^\"]*\)\".*/\1/p" "$2" | head -1; }
 
-# A module that needs a service which is not installed here, said last, where it is read. The
-# Archive's photos, videos and documents are analysed by the media service.
+# A module that talks to a service which is not installed here, said last, where it is read: the
+# services its mod.json names. The Archive's photos, videos and documents are analysed by the media
+# service, which the ems module, which it needs, talks to.
 modules_need() {
-  if [[ " ${EIN_MODULES:-} " == *" archive "* ]] && [ "$EIN_EMS" != 1 ]; then
-    echo "The Archive module needs the media service, which is not installed here: ./setup.sh --ems adds it."
+  local service option module
+  local -A what=([ems]="the media service" [automation]="the automation sidecar" [llm]="the language model")
+  for service in ems automation llm; do
+    option=EIN_${service^^}
+    [ "${!option:-0}" != 1 ] || continue
+    for module in $(modules_asking "$service"); do
+      echo "The $module module talks to ${what[$service]}, which is not installed here: ./setup.sh --$service adds it."
+    done
+  done
+}
+
+# The installed modules whose mod.json names a service, and the version of it each asks for, as
+# "<module> <major.minor[.patch]>" lines: a caret range's version, which modules are held to.
+modules_services() {
+  local file
+  for file in "$EIN_DATA"/modules/*/mod.json; do
+    [ -f "$file" ] || continue
+    sed -n '/^  "services": {/,/^  }/s/^ *"\([a-z][a-z0-9-]*\)": *"^\([0-9][0-9.]*\)".*/\1 \2/p' "$file" |
+      sed "s|^|$(basename "$(dirname "$file")") |"
+  done
+}
+modules_asking() { modules_services | awk -v s="$1" '$2 == s { print $1 }'; }
+
+# A version's line, the part a caret range holds: 0.4 for 0.4.x, 1 for 1.x.
+line_of() {
+  local major=${1%%.*} rest=${1#*.}
+  if [ "$major" = 0 ]; then echo "0.${rest%%.*}"; else echo "$major"; fi
+}
+
+# The line of a service the installed modules ask for, nothing when none names it. Modules that ask
+# for different lines are said, and the newest is taken: the older module's checks then say it is
+# out of date.
+wanted_line() {
+  local module service version lines=() asked=()
+  while read -r module service version; do
+    [ "$service" = "$1" ] || continue
+    asked+=("$module ^$version")
+    lines+=("$(line_of "$version")")
+  done < <(modules_services)
+  [ ${#lines[@]} != 0 ] || return 0
+  if [ "$(printf '%s\n' "${lines[@]}" | sort -u | wc -l)" -gt 1 ]; then
+    echo "The modules ask for different versions of $1 ($(IFS=,; echo "${asked[*]}" | sed 's/,/, /g')); the newest is taken" >&2
   fi
+  printf '%s\n' "${lines[@]}" | sort -V | tail -1
+}
+
+# The version of a service's source under src/, which a built image has: the media service's
+# API_VERSION, the sidecar's VERSION.
+source_version() {
+  case $1 in
+    ems) [ ! -f src/ems/ems/__init__.py ] || sed -n 's/^API_VERSION = "\([0-9.]*\)"$/\1/p' src/ems/ems/__init__.py ;;
+    automation) [ ! -f src/module-automation/sidecar/discovery.ts ] || sed -n "s/^export const VERSION = '\([0-9.]*\)';$/\1/p" src/module-automation/sidecar/discovery.ts ;;
+  esac
+}
+
+# Each service installed here at the line its modules ask for, pulled and started again when it is
+# at another; a line not published yet leaves it as it is. Built, the source is main's: what it is
+# and what the modules ask for are only compared.
+follow_lines() {
+  local service option line version
+  for service in ems automation; do
+    option=EIN_${service^^}
+    [ "${!option:-0}" = 1 ] || continue
+    line=$(wanted_line "$service")
+    [ -n "$line" ] || continue
+    if built; then
+      version=$(source_version "$service")
+      [ -z "$version" ] || [ "$(line_of "$version")" = "$line" ] ||
+        echo "The modules here ask for $service $line, and its source is $version: their checks in EiN say which is behind"
+      continue
+    fi
+    option=EIN_${service^^}_TAG
+    [ "$line" != "${!option:-main}" ] || continue
+    step "Getting $service $line, which the modules ask for"
+    pull_service "$service" && recreate "$service"
+  done
+}
+
+# A service's image pulled at the line its modules ask for, or at the one it has when that line is
+# not published (yet: a module's release can come before its service's image), or :main when it has
+# none. False when its tag stayed.
+pull_service() {
+  local option=EIN_${1^^}_TAG line
+  line=$(wanted_line "$1")
+  if [ -n "$line" ] && [ "$line" != "${!option:-main}" ]; then
+    if "$engine" pull "ghcr.io/einhq/$1:$line"; then
+      set_env "$option" "$line"
+      printf -v "$option" %s "$line"
+      write_override
+      return 0
+    fi
+    echo "The modules here ask for $1 $line, which is not published yet: it stays at ${!option:-main}"
+  fi
+  # Called where a failure does not stop the script, so it stops it itself.
+  "$engine" pull "$(image_of "$1")" || fail "$(image_of "$1") could not be pulled"
+  return 1
+}
+
+# The name :main taken off the images of the services that run at a line now, so the image it named
+# goes with the others replaced.
+drop_main_tags() {
+  local service option
+  built && return 0
+  for service in ems automation; do
+    option=EIN_${service^^}_TAG
+    [ -n "${!option:-}" ] && [ "${!option}" != main ] || continue
+    "$engine" image inspect "ghcr.io/einhq/$service:main" >/dev/null 2>&1 || continue
+    "$engine" rmi "ghcr.io/einhq/$service:main" >/dev/null 2>&1 || true
+  done
 }
 
 # The engine kept in .env, or on the first run --engine, else podman, else Docker. Under the other
@@ -641,10 +756,17 @@ built() {
 }
 
 # The image a service runs, core, db, ems or automation: the one GitHub publishes from the repository
-# of that name (module-automation's sidecar for automation), as the compose files name it, or the
-# one built here.
+# of that name (module-automation's sidecar for automation), at the line its modules ask for (the
+# media service and the sidecar, EIN_EMS_TAG and EIN_AUTOMATION_TAG) or :main, or the one built here.
 image_of() {
-  if built; then echo "localhost/ein-$1"; else echo "ghcr.io/einhq/$1:main"; fi
+  if built; then echo "localhost/ein-$1"; else echo "ghcr.io/einhq/$1:$(tag_of "$1")"; fi
+}
+tag_of() {
+  case $1 in
+    ems) echo "${EIN_EMS_TAG:-main}" ;;
+    automation) echo "${EIN_AUTOMATION_TAG:-main}" ;;
+    *) echo main ;;
+  esac
 }
 
 # A Forgejo or a Gitea source is where EiN installs its modules from too, with its token: core's
@@ -796,13 +918,15 @@ write_override() {
         automation)
           [ "$EIN_AUTOMATION" = 1 ] || continue
           lines+=("extends: { file: compose.automation.yaml, service: automation }")
-          ! built || lines+=("image: $(image_of automation)" "build: { context: src/module-automation/sidecar, dockerfile: Containerfile }")
+          lines+=("image: $(image_of automation)")
+          ! built || lines+=("build: { context: src/module-automation/sidecar, dockerfile: Containerfile }")
           ;;
         ems | llm)
           option=EIN_${service^^}
           [ "${!option}" = 1 ] || continue
           lines+=("extends: { file: compose.$service.yaml, service: $service }")
-          [ "$service" = llm ] || ! built || lines+=("image: $(image_of ems)" "build: { context: src/ems, dockerfile: Containerfile }")
+          [ "$service" = llm ] || lines+=("image: $(image_of ems)")
+          [ "$service" = llm ] || ! built || lines+=("build: { context: src/ems, dockerfile: Containerfile }")
           [ "$service" != ems ] || [ "$EIN_AUTOMATION" != 1 ] || [ "$engine" != docker ] || lines+=("extra_hosts: [\"automation:host-gateway\"]")
           devices=()
           [ "$EIN_GPU" != 1 ] || devices+=(nvidia.com/gpu=all)
@@ -926,7 +1050,12 @@ build() {
     export TMPDIR
   fi
   if ! built; then
-    for service in "${services[@]}"; do "$engine" pull "$(image_of "$service")"; done
+    for service in "${services[@]}"; do
+      case $service in
+        ems | automation) pull_service "$service" || true ;;
+        *) "$engine" pull "$(image_of "$service")" ;;
+      esac
+    done
     return
   fi
   local cached=()
@@ -983,7 +1112,7 @@ podman_compose_build() {
 built_images() {
   local repo name
   for repo in core db ems automation; do
-    for name in "localhost/ein-$repo" "ghcr.io/einhq/$repo:main"; do
+    for name in "localhost/ein-$repo" "ghcr.io/einhq/$repo:main" "ghcr.io/einhq/$repo:$(tag_of "$repo")"; do
       "$engine" image inspect --format '{{.Id}}' "$name" 2>/dev/null || true
     done
   done
