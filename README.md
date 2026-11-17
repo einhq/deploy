@@ -61,13 +61,18 @@ when that changed it, so an update takes the compose files and the script as the
 commit or change here that the pull cannot pass stops it, and `git status` says why. One run at a time:
 a second waits for the first to end, under `flock` on this folder.
 
-The images are pulled: GitHub builds them once a day from the `main` of their repositories, when it
-has moved since the last build, EiN's as `ghcr.io/einhq/core:main` with the web interface built in,
-the database's as `ghcr.io/einhq/db:main` (and again every week, for PostgreSQL's minor releases)
-and the media service's as `ghcr.io/einhq/ems`; the devices sidecar's, `ghcr.io/einhq/devices`,
-is built when its folder in module-devices changes, and the supervisor's, `ghcr.io/einhq/supervisor`,
-when `supervisor/` here does. From another source they are built here
-instead (below). The model's is llama.cpp's own.
+The images are pulled: GitHub builds them from the `main` of their repositories when the daily
+publish moves it, EiN's as `ghcr.io/einhq/core:main` with the web interface built in, the
+database's as `ghcr.io/einhq/db:main` (and again every week, for PostgreSQL's minor releases) and
+the media service's as `ghcr.io/einhq/ems`; the devices sidecar's, `ghcr.io/einhq/devices`, is
+built when its folder in module-devices changes, and the supervisor's, `ghcr.io/einhq/supervisor`,
+when `supervisor/` or the version here does. From another source they are built here instead
+(below). The model's is llama.cpp's own.
+
+Core, the database, this repository (with the supervisor) and the language model keep their
+version in `version.json`, which the publish releases as their commits call for; the images are
+tagged with it and its line as well as `:main` (`core:0.1.0` and `core:0.1`), and say it in their
+`eu.einhq.version` label.
 
 The media service and the sidecar are tagged with the version of what they offer EiN and with its
 line (`ems:0.4.4` and `ems:0.4`, the newest of the 0.4 versions), and pulled at the line the modules

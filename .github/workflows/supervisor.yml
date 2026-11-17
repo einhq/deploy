@@ -2,11 +2,14 @@ name: supervisor
 
 # The supervisor's image (supervisor/Containerfile), which setup.sh pulls for an installation from
 # GitHub's einhq: ghcr.io/einhq/supervisor:main is main as of the last build, :sha-<commit> each
-# commit built. Built when a push to main changes supervisor/, and at once when run by hand.
+# commit built, :<version> the newest build of version.json's version, which the publish releases
+# (ein/core#1419), and :<line> the newest of its line (0.1 for 0.1.x, 1 for 1.x). The label
+# eu.einhq.version says the version too. Built when a push to main changes supervisor/ or the
+# version, and at once when run by hand.
 on:
   push:
     branches: [main]
-    paths: ['supervisor/**', '.github/workflows/supervisor.yml']
+    paths: ['supervisor/**', 'version.json', '.github/workflows/supervisor.yml']
   workflow_dispatch:
 
 concurrency:
@@ -24,7 +27,13 @@ jobs:
     steps:
       - uses: actions/checkout@v7
       - id: sha
-        run: echo "sha=$(git rev-parse --short=9 HEAD)" >>"$GITHUB_OUTPUT"
+        run: |
+          echo "sha=$(git rev-parse --short=9 HEAD)" >>"$GITHUB_OUTPUT"
+          version=$(jq -r .version version.json)
+          [[ $version =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]] || { echo "no release version in version.json: $version"; exit 1; }
+          major=${version%%.*} minor=${version#*.}
+          echo "version=$version" >>"$GITHUB_OUTPUT"
+          echo "line=$([ "$major" = 0 ] && echo "0.${minor%%.*}" || echo "$major")" >>"$GITHUB_OUTPUT"
       - uses: docker/setup-qemu-action@v4
       - uses: docker/setup-buildx-action@v4
       - uses: docker/login-action@v4
@@ -41,7 +50,10 @@ jobs:
           tags: |
             ghcr.io/${{ github.repository_owner }}/supervisor:main
             ghcr.io/${{ github.repository_owner }}/supervisor:sha-${{ steps.sha.outputs.sha }}
+            ghcr.io/${{ github.repository_owner }}/supervisor:${{ steps.sha.outputs.version }}
+            ghcr.io/${{ github.repository_owner }}/supervisor:${{ steps.sha.outputs.line }}
           labels: |
             org.opencontainers.image.source=https://github.com/${{ github.repository }}
             org.opencontainers.image.revision=${{ github.sha }}
+            eu.einhq.version=${{ steps.sha.outputs.version }}
             org.opencontainers.image.description=EiN's supervisor: installs and updates the services beside EiN when EiN asks, run by compose from ein/deploy
