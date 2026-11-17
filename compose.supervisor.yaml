@@ -1,0 +1,25 @@
+# The supervisor, which setup.sh adds to an installation from GitHub's einhq unless --no-supervisor
+# leaves it out: it installs the media service, the language model and the devices sidecar when
+# EiN asks, and updates every service, through the container engine's socket. EiN reaches it on the
+# compose network at port 8199 with SUPERVISOR_KEY, and never gets the socket itself.
+#
+# It mounts this folder and the data folder at their own paths, which setup.sh keeps in .env
+# (EIN_DEPLOY, EIN_DATA, EIN_DB_DIR), so the setup.sh it runs reads and writes them as setup.sh on
+# this machine does. It runs as the user who owns them (EIN_SUPERVISOR_USER), and under Docker with
+# the socket's group (compose.override.yaml); `label=disable` lets it reach the socket under SELinux.
+services:
+  supervisor:
+    image: ghcr.io/einhq/supervisor:main
+    restart: unless-stopped
+    user: ${EIN_SUPERVISOR_USER:-0:0}
+    security_opt: [label=disable]
+    environment:
+      SUPERVISOR_KEY: ${SUPERVISOR_KEY}
+      SUPERVISOR_IMAGE: ghcr.io/einhq/supervisor:main
+      EIN_DEPLOY: ${EIN_DEPLOY}
+    mem_limit: 256m
+    memswap_limit: 256m
+    volumes:
+      - ${EIN_SOCKET}:/run/engine.sock
+      - ${EIN_DEPLOY}:${EIN_DEPLOY}
+      - ${EIN_DATA}:${EIN_DATA}

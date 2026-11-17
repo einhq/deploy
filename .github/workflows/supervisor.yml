@@ -1,0 +1,47 @@
+name: supervisor
+
+# The supervisor's image (supervisor/Containerfile), which setup.sh pulls for an installation from
+# GitHub's einhq: ghcr.io/einhq/supervisor:main is main as of the last build, :sha-<commit> each
+# commit built. Built when a push to main changes supervisor/, and at once when run by hand.
+on:
+  push:
+    branches: [main]
+    paths: ['supervisor/**', '.github/workflows/supervisor.yml']
+  workflow_dispatch:
+
+concurrency:
+  group: supervisor
+  cancel-in-progress: false
+
+jobs:
+  image:
+    # GitHub alone publishes: a Forgejo that runs this repository's workflows has no use for it.
+    if: github.server_url == 'https://github.com'
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      packages: write
+    steps:
+      - uses: actions/checkout@v7
+      - id: sha
+        run: echo "sha=$(git rev-parse --short=9 HEAD)" >>"$GITHUB_OUTPUT"
+      - uses: docker/setup-qemu-action@v4
+      - uses: docker/setup-buildx-action@v4
+      - uses: docker/login-action@v4
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+      - uses: docker/build-push-action@v7
+        with:
+          context: supervisor
+          file: supervisor/Containerfile
+          platforms: linux/amd64,linux/arm64
+          push: true
+          tags: |
+            ghcr.io/${{ github.repository_owner }}/supervisor:main
+            ghcr.io/${{ github.repository_owner }}/supervisor:sha-${{ steps.sha.outputs.sha }}
+          labels: |
+            org.opencontainers.image.source=https://github.com/${{ github.repository }}
+            org.opencontainers.image.revision=${{ github.sha }}
+            org.opencontainers.image.description=EiN's supervisor: installs and updates the services beside EiN when EiN asks, run by compose from ein/deploy

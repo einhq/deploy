@@ -10,7 +10,10 @@
 #                                 a listener for devices on the network, a restreamer for cameras
 #   ./setup.sh --module archive   also a module, which EiN installs at its start with the modules it needs
 #   ./setup.sh --no-ems --no-llm  leave an option out again (--no-devices too); its data stays
-#   ./setup.sh --only core        update one service, core, ems, db, llm or devices, and restart only it
+#   ./setup.sh --only core        update one service, core, ems, db, llm, devices or supervisor, and
+#                                 restart only it; --only core,db several, one after another
+#   ./setup.sh --no-supervisor    leave the supervisor out, which installs and updates the services
+#                                 when EiN asks; --supervisor adds it again
 #   ./setup.sh --source URL       fetch the sources and the modules from this organisation instead
 #   ./setup.sh --db-dir DIR       keep the database in this folder instead of db under the data folder
 #   ./setup.sh --http-port N      the web interface's port (default: 8080, or the next free one)
@@ -47,6 +50,17 @@
 # kept in .env as EIN_EMS_TAG and EIN_DEVICES_TAG, and :main before any module asks. A run after
 # a module's update in EiN pulls the line it asks for then.
 #
+# --only puts a service whose new image does not come up back on the image it ran, and fails, saying
+# so. Run by the supervisor (EIN_KEEP_CURRENT=1), it leaves a service that runs its newest image as
+# it is; run here, it starts it again, so a setting changed in .env takes effect.
+#
+# An installation from GitHub's einhq has the supervisor (compose.supervisor.yaml), unless
+# --no-supervisor leaves it out: a container holding the engine's socket, which installs the media
+# service, the language model and the sidecar when EiN asks, and updates the services with their
+# modules and each night at EIN_UPDATE_AT in .env (04:00; off for never). There every run, its own
+# and this one alike, runs in the supervisor's image, with the compose that comes with it, so this
+# machine needs the engine alone.
+#
 # The secrets come in the environment, every other setting as an option. setup.sh asks nothing:
 # the installer asks, and passes the answers on.
 set -euo pipefail
@@ -56,10 +70,12 @@ cd "$here"
 
 main() {
   local args=("$@") want_ems= want_llm= want_devices= modules=() source= db_dir= only= key=${EIN_SOURCE_KEY:-} options=0 unknown=
-  local http_port= ssh_port= bind=
+  local http_port= ssh_port= bind= want_supervisor=
   data_dir= want_engine=
   while [ $# -gt 0 ]; do
     case $1 in
+      --supervisor) want_supervisor=1 ;;
+      --no-supervisor) want_supervisor=0 ;;
       --ems) want_ems=1 ;;
       --no-ems) want_ems=0 ;;
       --llm) want_llm=1 ;;
@@ -105,7 +121,7 @@ main() {
         shift
         ;;
       --only)
-        [ $# -ge 2 ] || fail "--only needs a service: core, ems, db, llm or devices"
+        [ $# -ge 2 ] || fail "--only needs a service: core, ems, db, llm, devices or supervisor"
         only=$2
         shift 2
         continue
@@ -125,6 +141,8 @@ main() {
   update_self "$source" "${args[@]}"
   [ -z "$unknown" ] || fail "unknown option $unknown (--help lists them)"
   pick_engine
+  supervise "$want_supervisor" "$source" "$only" "${args[@]}"
+  pick_compose
   if [ -n "$only" ]; then
     [ "$options" = 0 ] || fail "--only updates what is installed: give the other options without it"
     [ -f .env ] || fail "--only updates an installation: run ./setup.sh first"
@@ -134,10 +152,11 @@ main() {
     # database's start refuses. Then every service starts again, each on its own (start).
     write_override
     if [ "$compose_tool" != podman-compose ] || [ "$(config_hash)" = "$(running_hash)" ]; then
-      update_one "$only"
+      local service
+      for service in ${only//,/ }; do update_one "$service"; done
       return
     fi
-    echo "The compose files changed, so every service is updated and started again, not $only alone"
+    echo "The compose files changed, so every service is updated and started again, not ${only//,/ and } alone"
   fi
 
   if [ -f .env ]; then
@@ -195,24 +214,26 @@ main() {
   # one by one (start).
   if [ "$compose_tool" = podman-compose ]; then
     compose down --remove-orphans
-    start db devices core ems llm
+    start db devices core ems llm supervisor
   else
     local recreate=()
     [ -z "$("$engine" ps -aq --filter label=com.docker.compose.project=ein)" ] || recreate=(--force-recreate)
     compose up -d "${recreate[@]}" --remove-orphans
   fi
   check_db_mount
-  wait_for_ein
+  wait_for_ein || exit 1
   follow_lines
   drop_main_tags
   remove_replaced $old
-  after_reboot
+  [ -n "${EIN_SUPERVISOR_JOB:-}" ] || after_reboot
   modules_report
   modules_need
 }
 
 # One service fetched, built and restarted, the others left running: an update of EiN alone does not
-# restart the media service, the model or the database.
+# restart the media service, the model or the database. One whose new image does not come up goes
+# back to the image it ran, and one that runs its newest image already is left as it is when
+# EIN_KEEP_CURRENT is set, as the supervisor's runs set it.
 update_one() {
   case $1 in
     core) ! built || fetch core src/core ;;
@@ -227,23 +248,100 @@ update_one() {
       devices_secrets
       ! built || fetch module-devices src/module-devices
       ;;
-    *) fail "--only takes core, ems, db, llm or devices, not $1" ;;
+    supervisor) [ "${EIN_SUPERVISOR:-0}" = 1 ] || fail "the supervisor is not installed here: ./setup.sh --supervisor adds it" ;;
+    *) fail "--only takes core, ems, db, llm, devices or supervisor, not $1" ;;
   esac
   step "Getting $1's image"
-  local old
+  local old ran tag
   old=$(built_images)
+  ran=$(running_image "$1")
+  tag=$(tag_of "$1")
   build "$1"
   [ "$1" != db ] || prepare_db_dir
-  # EiN goes and comes back with the database: podman keeps a container that another requires, so
-  # the one that requires it goes first.
-  if [ "$1" = db ]; then recreate core db; else recreate "$1"; fi
-  case $1 in
-    db) check_db_mount && wait_for_ein ;;
-    core) wait_for_ein && modules_report ;;
-  esac
+  # The model's image is pinned in its compose file, and its update is its templates under src/.
+  if [ -n "${EIN_KEEP_CURRENT:-}" ] && [ "$1" != llm ] && [ -n "$ran" ] && [ "$ran" = "$(image_id "$1")" ]; then
+    echo "$1 runs its newest image already"
+    # Compose makes it again only when its definition changed; podman-compose 1.0 would make it
+    # again whatever, and its changed definition takes the whole project again (main).
+    [ "$compose_tool" = podman-compose ] || compose up -d --no-deps "$1"
+  else
+    restart_service "$1"
+    came_up "$1" || roll_back "$1" "$ran" "$tag"
+    echo "$1 is up on its new image"
+  fi
+  [ "$1" != core ] || modules_report
   drop_main_tags
   remove_replaced $old
 }
+
+# EiN goes and comes back with the database: podman keeps a container that another requires, so
+# the one that requires it goes first.
+restart_service() { if [ "$1" = db ]; then recreate core db; else recreate "$1"; fi; }
+
+# Whether a service came up on the image it was made again from: EiN answers, the database and the
+# media service report healthy, and the others run without restarting.
+came_up() {
+  case $1 in
+    core) wait_for_ein ;;
+    db) container_up db 300 && check_db_mount && wait_for_ein ;;
+    ems) container_up ems 900 ;;
+    *) container_up "$1" 60 ;;
+  esac
+}
+
+# A service's container healthy within so many seconds, or, where it has no health check, still
+# running 20 seconds after it started and never restarted. podman reports a container without a
+# check as starting, so its verdict counts only where the container has a check.
+container_up() {
+  local id status health restarts waited=0
+  echo "Waiting for $1 to come up"
+  while [ "$waited" -lt "$2" ]; do
+    id=$(service_container "$1")
+    status= health= restarts=0
+    [ -z "$id" ] || IFS=/ read -r status health restarts \
+      <<<"$("$engine" inspect --format '{{.State.Status}}/{{if .Config.Healthcheck}}{{if .Config.Healthcheck.Test}}{{.State.Health.Status}}{{end}}{{end}}/{{.RestartCount}}' "$id" 2>/dev/null)"
+    case $status/$health in
+      */healthy) return 0 ;;
+      */unhealthy | exited/* | dead/*) break ;;
+    esac
+    [ "${restarts:-0}" -lt 3 ] || break
+    [ -n "$health" ] || [ "$status" != running ] || [ "${restarts:-0}" != 0 ] || [ "$waited" -lt 20 ] || return 0
+    sleep 5
+    waited=$((waited + 5))
+  done
+  echo "$1 did not come up: ${status:-no container}${health:+, $health}$([ "${restarts:-0}" = 0 ] || echo ", restarted $restarts times")" >&2
+  return 1
+}
+
+# A service whose new image did not come up, put back on the image it ran (ran), at the line it was
+# at (tag). The update fails, saying so; the new image goes.
+roll_back() {
+  local service=$1 ran=$2 tag=$3 new id
+  [ -n "$ran" ] && [ "$service" != llm ] || fail "$service did not come up: $engine compose logs $service"
+  id=$(service_container "$service")
+  [ -z "$id" ] || { echo "Its log:"; "$engine" logs --tail 30 "$id" 2>&1 | sed 's/^/  /'; } >&2
+  step "Putting $service back on the image it ran"
+  new=$(image_id "$service")
+  if [ "$tag" != "$(tag_of "$service")" ]; then
+    set_env "EIN_${service^^}_TAG" "$tag"
+    printf -v "EIN_${service^^}_TAG" %s "$tag"
+    write_override
+  fi
+  "$engine" tag "$ran" "$(image_of "$service")"
+  restart_service "$service"
+  came_up "$service" || fail "$service does not come up on the image it ran before either: $engine compose logs $service"
+  [ -z "$new" ] || [ "$new" = "$ran" ] || "$engine" rmi "$new" >/dev/null 2>&1 || true
+  fail "$service did not come up on its new image, and runs on the one it ran before; its log above says why"
+}
+
+# The container of a service, its image, and the image it would run now.
+service_container() { "$engine" ps -aq --filter label=com.docker.compose.project=ein --filter "label=com.docker.compose.service=$1" | head -1; }
+running_image() {
+  local id
+  id=$(service_container "$1")
+  [ -z "$id" ] || "$engine" inspect --format '{{.Image}}' "$id"
+}
+image_id() { "$engine" image inspect --format '{{.Id}}' "$(image_of "$1")" 2>/dev/null || true; }
 
 # The services' containers replaced by new ones from their images, and nothing else touched. Not
 # compose's own --force-recreate: podman-compose 1.0 takes the services' dependencies down with
@@ -266,9 +364,9 @@ recreate() {
 # through a restart; a plain `podman compose up -d` that creates a container leaves it out.
 start() {
   local service mem
-  for service in db devices core ems llm; do
+  for service in db devices core ems llm supervisor; do
     [[ " $* " == *" $service "* ]] || continue
-    case $service in ems | llm | devices) local option=EIN_${service^^}; [ "${!option}" = 1 ] || continue ;; esac
+    case $service in ems | llm | devices | supervisor) local option=EIN_${service^^}; [ "${!option:-0}" = 1 ] || continue ;; esac
     # The dry run writes its commands to stderr, the services this one needs too: 1.0 ignores --no-deps.
     mem=$(compose --dry-run up -d --no-deps "$service" 2>&1 |
       sed -n "/^podman run .* --label com.docker.compose.service=$service /s/.* -m \([^ ]*\) .*/\1/p" | tail -1)
@@ -315,7 +413,7 @@ modules_need() {
     option=EIN_${service^^}
     [ "${!option:-0}" != 1 ] || continue
     for module in $(modules_asking "$service"); do
-      echo "The $module module talks to ${what[$service]}, which is not installed here: ./setup.sh --$service adds it."
+      echo "The $module module talks to ${what[$service]}, which is not installed here: $([ "${EIN_SUPERVISOR:-0}" != 1 ] || echo "Settings → Modules in EiN installs it, or ")./setup.sh --$service adds it."
     done
   done
 }
@@ -436,23 +534,128 @@ pick_engine() {
   fi
   case $engine in podman | docker) ;; *) fail "--engine takes podman or docker, not $engine" ;; esac
   command -v "$engine" >/dev/null || fail "EiN here runs under $engine, which is not installed"
+  compose_tool=
+  # Under podman's older network backend, CNI, containers find each other by name only with its
+  # dnsname plugin, and EiN finds its database by the name db. A run in the supervisor's image
+  # has none of this machine's plugin folders to look in: the run that started it looked.
+  if [ "$engine" = podman ] && [ -z "${EIN_SUPERVISOR_JOB:-}" ] && [ "$(podman info --format '{{.Host.NetworkBackend}}')" = cni ] && ! has_dnsname; then
+    fail "podman's networks here give no names, which EiN needs to find its database: install podman's CNI plugin dnsname (Debian and Ubuntu: golang-github-containernetworking-plugin-dnsname; Fedora: podman-plugins), then ./setup.sh again"
+  fi
+  [ ! -f .env ] || [ -n "$kept" ] || set_env EIN_ENGINE "$engine"
+}
+
+# An installation with the supervisor runs every setup.sh in the supervisor's image, with the
+# compose that comes with it: this machine needs the engine alone, and the services are made by the
+# same compose whoever starts the run, this machine or the supervisor. This run goes on there, and
+# this returns only when it goes on here: in that image already, or without the supervisor.
+#
+# A new installation has the supervisor when its sources are GitHub's einhq, whose images it pulls,
+# and an installation from before it gets it with --supervisor. One whose image cannot be had, or
+# whose engine has no socket to give it, goes on without it, and says so.
+supervise() {
+  local want=$1 source=$2 only=$3 kept= from status=0 data db mounts=()
+  shift 3
+  [ -z "${EIN_SUPERVISOR_JOB:-}" ] || return 0
+  [ -f .env ] || [ -z "$only" ] || return 0
+  if [ -f .env ]; then
+    kept=$(sed -n 's/^EIN_SUPERVISOR=//p' .env)
+    from=$(sed -n 's/^EIN_SOURCE=//p' .env)
+  fi
+  from=${source:-${from:-https://github.com/einhq}}
+  if [ -z "$want" ]; then
+    want=$kept
+    [ -n "$want" ] || [ -f .env ] || ! published "$from" || want=1
+  fi
+  if [ "$want" != 1 ]; then
+    [ ! -f .env ] || [ "${kept:-0}" = 0 ] || set_env EIN_SUPERVISOR 0
+    return 0
+  fi
+  published "$from" ||
+    fail "the supervisor runs the images GitHub's einhq publishes, and the sources here are $from, whose images are built here: run ./setup.sh --no-supervisor"
+  [ -f .env ] || write_env
+  if ! supervisor_settings; then
+    set_env EIN_SUPERVISOR 0
+    echo "This run goes on without the supervisor; ./setup.sh --supervisor tries again"
+    return 0
+  fi
+  set_env EIN_SUPERVISOR 1
+  data=$(sed -n 's/^EIN_DATA=//p' .env)
+  db=$(sed -n 's/^EIN_DB_DIR=//p' .env)
+  mounts=(-v "$(sed -n 's/^EIN_SOCKET=//p' .env):/run/engine.sock" -v "$here:$here" -v "$data:$data")
+  [ -z "$db" ] || mounts+=(-v "$db:$db")
+  local user gid
+  user=$(sed -n 's/^EIN_SUPERVISOR_USER=//p' .env)
+  gid=$(sed -n 's/^EIN_SOCKET_GID=//p' .env)
+  mkdir -p "$data"
+  [ -z "$db" ] || mkdir -p "$db"
+  # Its network and name are this machine's, so it sees the ports taken here and EiN's own.
+  "$engine" run --rm --name ein-setup --network host --uts host --security-opt label=disable \
+    --user "$user" ${gid:+--group-add "$gid"} "${mounts[@]}" \
+    -e EIN_SETUP_LOCKED=1 -e EIN_SUPERVISOR_JOB=1 -e EIN_DEPLOY="$here" ${EIN_SOURCE_KEY:+-e EIN_SOURCE_KEY} \
+    -w "$here" --entrypoint "$here/setup.sh" "$SUPERVISOR_IMAGE" "$@" || status=$?
+  [ "$status" != 0 ] || after_reboot
+  exit "$status"
+}
+SUPERVISOR_IMAGE=ghcr.io/einhq/supervisor:main
+
+# Whether an organisation's address is GitHub's einhq, which publishes the images.
+published() {
+  local owner=${1##*/}
+  is_github "$1" && [ "${owner,,}" = einhq ]
+}
+
+# What the supervisor's containers are given, kept in .env for compose.supervisor.yaml and for the
+# runs it starts: the engine's socket, which podman is made to listen on; the user they run as, who
+# owns this folder: root in the container where the engine is this user's (rootless podman, whose
+# root in a container is this user), else this user with the socket's group (Docker's); this
+# folder's path; the key EiN asks with; and the image, pulled. False, saying why, without them.
+supervisor_settings() {
+  local socket user=0:0 gid=
+  if [ "$engine" = podman ]; then
+    socket=$(podman info --format '{{.Host.RemoteSocket.Path}}')
+    socket=${socket#unix://}
+    if [ ! -S "$socket" ]; then
+      local scope=(--user)
+      [ "$(id -u)" != 0 ] || scope=()
+      systemctl "${scope[@]}" enable --now podman.socket >/dev/null 2>&1 || true
+    fi
+  else
+    socket=$(docker context inspect --format '{{.Endpoints.docker.Host}}' 2>/dev/null || true)
+    socket=${socket#unix://}
+    socket=${socket:-/var/run/docker.sock}
+  fi
+  if [ ! -S "$socket" ]; then
+    echo "The supervisor needs $engine's socket, which is not at $socket$([ "$engine" != podman ] || echo ": systemctl --user enable --now podman.socket makes it")"
+    return 1
+  fi
+  if [ "$(id -u)" != 0 ] && [ "$(stat -c %u "$socket")" != "$(id -u)" ]; then
+    user=$(id -u):$(id -g)
+    gid=$(stat -c %g "$socket")
+  fi
+  set_env EIN_SOCKET "$socket"
+  set_env EIN_SUPERVISOR_USER "$user"
+  set_env EIN_SOCKET_GID "$gid"
+  set_env EIN_DEPLOY "$here"
+  grep -q '^SUPERVISOR_KEY=.' .env || set_env SUPERVISOR_KEY "$(secret)"
+  grep -q '^EIN_UPDATE_AT=' .env || set_env EIN_UPDATE_AT 04:00
+  "$engine" pull "$SUPERVISOR_IMAGE" && return 0
+  "$engine" image inspect "$SUPERVISOR_IMAGE" >/dev/null 2>&1 && echo "It goes on with the supervisor's image it has" && return 0
+  echo "The supervisor's image, $SUPERVISOR_IMAGE, could not be pulled"
+  return 1
+}
+
+# The engine's compose, which runs the services: here, or in the supervisor's image (supervise).
+pick_compose() {
   "$engine" compose version >/dev/null 2>&1 ||
     fail "'$engine compose' does not run: install podman-compose (or docker-compose) for podman, or the compose plugin for Docker"
   # docker-compose under podman, when it is installed and podman-compose is not: it reaches podman
   # through podman's socket, and builds through it too rather than with a docker command.
-  compose_tool=
   if [ "$engine" = podman ] && [[ $(podman compose version 2>&1) == *podman-compose* ]]; then compose_tool=podman-compose; fi
   if [ "$engine" = podman ] && [ "$compose_tool" != podman-compose ]; then
     export COMPOSE_DOCKER_CLI_BUILD=0
     curl -sf -o /dev/null --unix-socket "$(podman info --format '{{.Host.RemoteSocket.Path}}')" http://d/_ping ||
       fail "'podman compose' runs docker-compose here, which needs podman's socket: systemctl --user enable --now podman.socket, then ./setup.sh again"
   fi
-  # Under podman's older network backend, CNI, containers find each other by name only with its
-  # dnsname plugin, and EiN finds its database by the name db.
-  if [ "$engine" = podman ] && [ "$(podman info --format '{{.Host.NetworkBackend}}')" = cni ] && ! has_dnsname; then
-    fail "podman's networks here give no names, which EiN needs to find its database: install podman's CNI plugin dnsname (Debian and Ubuntu: golang-github-containernetworking-plugin-dnsname; Fedora: podman-plugins), then ./setup.sh again"
-  fi
-  [ ! -f .env ] || [ -n "$kept" ] || set_env EIN_ENGINE "$engine"
   pick_ein_network
 }
 
@@ -476,10 +679,10 @@ pick_ein_network() {
   fi
 }
 
-# The loopback ports EiN reaches the database, the media service and the model on, when it has a
-# network of its own (pick_ein_network): each published on 127.0.0.1 alone, and moved to the next
-# free one like EiN's own ports.
-declare -A loopback_ports=([EIN_DB_PORT]=15432 [EIN_EMS_PORT]=18181 [EIN_LLM_PORT]=18190)
+# The loopback ports EiN reaches the database, the media service, the model and the supervisor on,
+# when it has a network of its own (pick_ein_network): each published on 127.0.0.1 alone, and moved
+# to the next free one like EiN's own ports.
+declare -A loopback_ports=([EIN_DB_PORT]=15432 [EIN_EMS_PORT]=18181 [EIN_LLM_PORT]=18190 [EIN_SUPERVISOR_PORT]=18199)
 
 # A service's loopback port as compose reads it in compose.override.yaml: from .env, or the default.
 loopback_port() { echo "\${EIN_${1^^}_PORT:-${loopback_ports[EIN_${1^^}_PORT]}}"; }
@@ -560,6 +763,12 @@ MQTT_DEVICE_PASSWORD=$(secret 12)
 STREAMS_PORT=1984
 RTSP_PORT=8554
 STREAMS_PASSWORD=$(secret)
+
+# The supervisor, which installs the media service, the language model and the sidecar when EiN asks,
+# and updates the services: with their modules, and each night at EIN_UPDATE_AT (off: only when
+# asked). setup.sh --supervisor / --no-supervisor sets it; it is for installations from GitHub's einhq.
+EIN_SUPERVISOR=0
+EIN_UPDATE_AT=04:00
 
 # The modules EiN installs at its start when it lacks them, with the modules they need, into the
 # modules folder under EIN_DATA; setup.sh --module adds one. Settings → Modules lists the published
@@ -750,14 +959,12 @@ is_github() { [[ $(host_of "$1") =~ ^(www\.)?github\.com$ ]]; }
 # The images of EiN, the database and the media service are pulled when the sources are GitHub's
 # einhq, which publishes them, and built here from the sources when they come from anywhere else,
 # whose commits those images do not have.
-built() {
-  local owner=${EIN_SOURCE##*/}
-  ! is_github "$EIN_SOURCE" || [ "${owner,,}" != einhq ]
-}
+built() { ! published "$EIN_SOURCE"; }
 
-# The image a service runs, core, db, ems or devices: the one GitHub publishes from the repository
-# of that name (module-devices's sidecar for devices), at the line its modules ask for (the
-# media service and the sidecar, EIN_EMS_TAG and EIN_DEVICES_TAG) or :main, or the one built here.
+# The image a service runs, core, db, ems, devices or supervisor: the one GitHub publishes from the
+# repository of that name (module-devices's sidecar for devices, deploy's supervisor/ for the
+# supervisor), at the line its modules ask for (the media service and the sidecar, EIN_EMS_TAG and
+# EIN_DEVICES_TAG) or :main, or the one built here.
 image_of() {
   if built; then echo "localhost/ein-$1"; else echo "ghcr.io/einhq/$1:$(tag_of "$1")"; fi
 }
@@ -868,6 +1075,9 @@ port_taken() {
 # from there too under slirp4netns, so EiN believes its forwarding headers (TRUSTED_PROXIES), and
 # those of any proxy .env names in TRUSTED_PROXIES.
 #
+# The supervisor (compose.supervisor.yaml) is given the socket's group under Docker, and EiN its
+# address and key.
+#
 # The devices sidecar is on this machine's own network, listening on its ports itself. EiN with a
 # network of its own reaches it at this machine's loopback as it reaches the others; on the compose
 # network, at this machine's address there: host.containers.internal under podman, the name
@@ -877,7 +1087,7 @@ port_taken() {
 write_override() {
   local service option lines env devices written=0 reached=() hosts=() forwards=() files_address files_published=
   local devices_host=devices
-  local -A port_in=([db]=5432 [ems]=8181 [llm]=8190)
+  local -A port_in=([db]=5432 [ems]=8181 [llm]=8190 [supervisor]=8199)
   # The media service reaches the files of its requests at EiN's ems-files port: by EiN's name on
   # the compose network, or, with EiN on a network of its own, at this machine's address, where the
   # port is published. One that .env names, a media service elsewhere, reaches it published too.
@@ -895,6 +1105,7 @@ write_override() {
     [ "$EIN_EMS" != 1 ] || reached+=(ems)
     [ "$EIN_LLM" != 1 ] || reached+=(llm)
     [ "$EIN_DEVICES" != 1 ] || reached+=(devices)
+    [ "${EIN_SUPERVISOR:-0}" != 1 ] || reached+=(supervisor)
     for service in "${reached[@]}"; do
       hosts+=("\"$service:$([ "$ein_network" = pasta ] && echo 127.0.0.1 || echo 10.0.2.2)\"")
       if [ "$service" = devices ]; then
@@ -912,9 +1123,14 @@ write_override() {
     echo "# Written by setup.sh from the options in .env and the container engine; edit those and run"
     echo "# setup.sh again."
     echo "services:"
-    for service in db devices core ems llm; do
+    for service in db devices core ems llm supervisor; do
       lines=()
       case $service in
+        supervisor)
+          [ "${EIN_SUPERVISOR:-0}" = 1 ] || continue
+          lines+=("extends: { file: compose.supervisor.yaml, service: supervisor }")
+          [ -z "${EIN_SOCKET_GID:-}" ] || lines+=("group_add: [\"$EIN_SOCKET_GID\"]")
+          ;;
         devices)
           [ "$EIN_DEVICES" = 1 ] || continue
           lines+=("extends: { file: compose.devices.yaml, service: devices }")
@@ -965,6 +1181,10 @@ write_override() {
             env+=("CFG_DEVICES_STREAMS_RTSP: rtsp://$([ "$engine" = docker ] && echo devices || echo host.containers.internal):\${RTSP_PORT:-8554}")
           fi
           [ -z "$files_address" ] || [ -n "${CFG_EMS_FILES_ADDRESS:-}" ] || env+=("CFG_EMS_FILES_ADDRESS: $files_address")
+          if [ "${EIN_SUPERVISOR:-0}" = 1 ]; then
+            env+=("CFG_SUPERVISOR_URL: http://supervisor:$(if [ -n "$ein_network" ]; then loopback_port supervisor; else echo 8199; fi)")
+            env+=("CFG_SUPERVISOR_KEY: \${SUPERVISOR_KEY}")
+          fi
           [ ${#env[@]} = 0 ] || lines+=("environment:" "${env[@]/#/  }")
           [ -z "$files_published" ] ||
             lines+=("ports: [\"\${EIN_BIND:-0.0.0.0}:\${CFG_EMS_FILES_PORT:-2224}:\${CFG_EMS_FILES_PORT:-2224}\"]")
@@ -1030,21 +1250,23 @@ add_modules() {
   set_env EIN_MODULES "\"${names[*]}\""
 }
 
-# Every image, or the one service's when one is named: EiN's, the database's, the media service's
-# and the devices sidecar's pulled, or built from their sources (built). The model's is neither:
-# compose up pulls it.
+# Every image, or the one service's when one is named: EiN's, the database's, the media service's,
+# the devices sidecar's and the supervisor's pulled, or the first four built from their sources
+# (built), where there is no supervisor. The model's is neither: compose up pulls it.
 build() {
   local one=${1:-} service services=()
-  for service in core db ems devices; do
+  for service in core db ems devices supervisor; do
     [ -z "$one" ] || [ "$one" = "$service" ] || continue
     [ "$service" != ems ] || [ "$EIN_EMS" = 1 ] || continue
     [ "$service" != devices ] || [ "$EIN_DEVICES" = 1 ] || continue
+    [ "$service" != supervisor ] || [ "${EIN_SUPERVISOR:-0}" = 1 ] || continue
     services+=("$service")
   done
   [ ${#services[@]} != 0 ] || return 0
   # Under podman a pull's and a build's scratch files go next to its storage: /tmp is often too
-  # small for the media service's layers. Docker keeps them in its own storage already.
-  if [ "$engine" = podman ]; then
+  # small for the media service's layers. Docker keeps them in its own storage already, and so does
+  # podman for its remote client, in the supervisor's image.
+  if [ "$engine" = podman ] && [ -z "${EIN_SUPERVISOR_JOB:-}" ]; then
     TMPDIR="$(podman info --format '{{.Store.GraphRoot}}')/tmp"
     mkdir -p "$TMPDIR"
     export TMPDIR
@@ -1053,6 +1275,8 @@ build() {
     for service in "${services[@]}"; do
       case $service in
         ems | devices) pull_service "$service" || true ;;
+        # Its image may be one GitHub has not published yet: the one here goes on.
+        supervisor) "$engine" pull "$SUPERVISOR_IMAGE" || "$engine" image inspect "$SUPERVISOR_IMAGE" >/dev/null ;;
         *) "$engine" pull "$(image_of "$service")" ;;
       esac
     done
@@ -1111,7 +1335,7 @@ podman_compose_build() {
 # The ids of the images build tags or pull.
 built_images() {
   local repo name
-  for repo in core db ems devices; do
+  for repo in core db ems devices supervisor; do
     for name in "localhost/ein-$repo" "ghcr.io/einhq/$repo:main" "ghcr.io/einhq/$repo:$(tag_of "$repo")"; do
       "$engine" image inspect --format '{{.Id}}' "$name" 2>/dev/null || true
     done
@@ -1142,7 +1366,7 @@ remove_replaced() {
 # storage is inside its virtual machine).
 free_bytes() { df -B1 --output=avail "$1" 2>/dev/null | tail -1 || true; }
 
-# EiN answers once its database is up and its boot is through.
+# EiN answers once its database is up and its boot is through; false, saying why, when it does not.
 wait_for_ein() {
   local url="http://127.0.0.1:$EIN_HTTP_PORT/" id line last= down=0
   echo "Waiting for EiN to answer at $url; its first start takes a minute or more"
@@ -1168,7 +1392,8 @@ wait_for_ein() {
     fi
     if [ "$down" -ge 3 ] || { [ -n "$id" ] && [ "$("$engine" inspect --format '{{.RestartCount}}' "$id")" -ge 3 ]; }; then
       [ -z "$id" ] || "$engine" logs --tail 30 "$id" >&2 || true
-      fail "EiN stopped before it answered; its log is above: $engine compose logs core"
+      echo "setup.sh: EiN stopped before it answered; its log is above: $engine compose logs core" >&2
+      return 1
     fi
     # Every 10 seconds, what EiN last logged, when it is new.
     if [ -n "$id" ] && [ $((i % 5)) = 0 ]; then
@@ -1178,7 +1403,8 @@ wait_for_ein() {
     fi
     sleep 2
   done
-  fail "EiN did not answer at $url in 10 minutes: $engine compose logs core"
+  echo "setup.sh: EiN did not answer at $url in 10 minutes: $engine compose logs core" >&2
+  return 1
 }
 
 # Whether EiN starts again when the machine does, made so where this user may, and what it takes

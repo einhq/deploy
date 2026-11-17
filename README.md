@@ -24,7 +24,9 @@ any time after:
                               # a listener for devices on the network, a restreamer for cameras
 ./setup.sh --module archive   # a module, which EiN installs at its start with the modules it needs (archive needs ems)
 ./setup.sh                    # update: this folder and the newest images, pulled and restarted
-./setup.sh --only core        # update one service, core, ems, db, llm or devices, and restart only it
+./setup.sh --only core        # update one service, core, ems, db, llm, devices or supervisor, and restart
+                              # only it; --only core,db several
+./setup.sh --no-supervisor    # leave the supervisor out (below); --supervisor adds it again
 ./setup.sh --http-port 8081   # the web interface's port; --ssh-port SSH and SFTP's
 ./setup.sh --bind 127.0.0.1   # listen on this machine alone, behind an HTTPS proxy of your own
 ```
@@ -42,6 +44,8 @@ compose.yaml            EiN and PostgreSQL: the base every install runs
 compose.ems.yaml        the media service, which --ems adds
 compose.llm.yaml        the language model, which --llm adds
 compose.devices.yaml    the Devices module's sidecar, which --devices adds
+compose.supervisor.yaml the supervisor, which an installation from GitHub's einhq has
+supervisor/             the supervisor's image: its server, supervisor.py, and what setup.sh needs to run in it
 setup.sh                updates this folder, writes .env and compose.override.yaml, pulls or builds the images, starts
 
 src/                    the sources setup.sh fetches: ems and llm with their options, and core, db and
@@ -61,7 +65,8 @@ The images are pulled: GitHub builds them once a day from the `main` of their re
 has moved since the last build, EiN's as `ghcr.io/einhq/core:main` with the web interface built in,
 the database's as `ghcr.io/einhq/db:main` (and again every week, for PostgreSQL's minor releases)
 and the media service's as `ghcr.io/einhq/ems`; the devices sidecar's, `ghcr.io/einhq/devices`,
-is built when its folder in module-devices changes. From another source they are built here
+is built when its folder in module-devices changes, and the supervisor's, `ghcr.io/einhq/supervisor`,
+when `supervisor/` here does. From another source they are built here
 instead (below). The model's is llama.cpp's own.
 
 The media service and the sidecar are tagged with the version of what they offer EiN and with its
@@ -74,6 +79,35 @@ EiN's Status page says the media service is too old for it.
 
 Back up `.env` and the data folder, which holds the database too, unless `--db-dir` put it
 elsewhere (below).
+
+## The supervisor
+
+An installation from GitHub's `einhq` has the supervisor, unless `--no-supervisor` leaves it out
+(`EIN_SUPERVISOR` in `.env`; `--supervisor` adds it to an installation from before it). It is the
+one container that holds the container engine's socket, which EiN never gets: Docker's socket is
+root on the machine, and rootless podman's the whole account, while EiN faces the network and runs
+its modules' code. EiN asks it, on the compose network with `SUPERVISOR_KEY`, for a fixed set of
+services by name: to install the media service, the language model or the sidecar, to update any
+service, or how each stands. Settings → Modules in EiN shows them, and `supervisor status`,
+`supervisor install` and `supervisor update` in EiN's shell do the same.
+
+It does each as a job, `setup.sh` with the options for it, run in a container of its own image
+(`supervisor/`, `ghcr.io/einhq/supervisor`) with this folder and the data folder mounted at their
+own paths, which goes on while the supervisor is made again; its output is in `supervisor/` in the
+data folder. Unasked, it updates the media service or the sidecar within a minute of a module asking
+for another line of it, and every service each night at `EIN_UPDATE_AT` (04:00; `off` for never).
+Its updates leave a service that runs its newest image as it is.
+
+With the supervisor, every `setup.sh` runs in its image, the one run here too: this machine needs the
+engine and its socket alone (setup.sh turns on `podman.socket` under podman), and the services are
+made by the same compose whoever starts the run. The image has podman's remote client with
+podman-compose 1.0.6, and Docker's CLI with its compose.
+
+From another source the images are built here, and there is no supervisor.
+
+`--only` puts a service whose new image does not come up (EiN does not answer, the database or the
+media service is not healthy, another service stops or restarts) back on the image it ran, and
+fails, saying so.
 
 ## Running it
 

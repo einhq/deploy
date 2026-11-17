@@ -1,0 +1,37 @@
+# The supervisor: EiN's services installed and updated from EiN, through the container engine's
+# socket, which this container alone holds. It answers EiN on the compose network (supervisor.py)
+# and runs each install or update as setup.sh in a container of this image, a job, which outlives
+# the supervisor's own restart. So the image carries what setup.sh runs: bash, git and curl, the
+# Docker CLI with its compose (the base), podman's remote client and podman-compose.
+FROM docker.io/library/docker:29-cli
+
+ARG TARGETARCH
+# podman's remote client talks to every podman from 4.0 on.
+ARG PODMAN_VERSION=5.8.10
+# The podman-compose setup.sh is written for, as Ubuntu 24.04 has it: it gives EiN slirp4netns for
+# a network of its own under rootless podman, and setup.sh reads its dry runs.
+ARG PODMAN_COMPOSE_VERSION=1.0.6
+
+RUN apk add --no-cache bash coreutils curl findutils flock gawk git grep iproute2-ss python3 py3-pip sed tzdata \
+  && pip install --no-cache-dir --root-user-action=ignore --break-system-packages "podman-compose==${PODMAN_COMPOSE_VERSION}" \
+  && cd /tmp \
+  && file="podman-remote-static-linux_${TARGETARCH:-amd64}.tar.gz" \
+  && curl -fsSLO "https://github.com/containers/podman/releases/download/v${PODMAN_VERSION}/${file}" \
+  && curl -fsSL "https://github.com/containers/podman/releases/download/v${PODMAN_VERSION}/shasums" | grep " ${file}\$" | sha256sum -c - \
+  && tar -xzf "$file" \
+  && mv "bin/podman-remote-static-linux_${TARGETARCH:-amd64}" /usr/local/bin/podman \
+  && rm -rf "$file" bin \
+  && git config --system safe.directory '*'
+
+# The engine's socket is mounted here; podman compose runs podman-compose, never the Docker CLI's
+# compose plugin, as setup.sh expects under podman.
+ENV CONTAINER_HOST=unix:///run/engine.sock \
+  DOCKER_HOST=unix:///run/engine.sock \
+  PODMAN_COMPOSE_PROVIDER=podman-compose \
+  PODMAN_COMPOSE_WARNING_LOGS=false \
+  HOME=/tmp \
+  PYTHONUNBUFFERED=1
+
+COPY supervisor.py /usr/local/bin/supervisor
+ENTRYPOINT ["python3", "/usr/local/bin/supervisor"]
+CMD ["serve"]
