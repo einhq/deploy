@@ -1,7 +1,9 @@
 # The assistant's language model, as an option: setup.sh --llm names it in compose.override.yaml,
 # with the graphics card when there is one. llama.cpp's server, fetching the model into EIN_DATA/llm
 # on its first start. On the card it takes as many layers as leave the media service
-# LLM_CARD_RESERVE_MB of it; llm's README explains the share.
+# LLM_CARD_RESERVE_MB of it, and runs the others on the processor: on a card it shares with the media
+# service, that service's share of the card plus a little. The media service's share is its user's
+# to move while it runs; this reserve is read when the model starts.
 #
 # llama.cpp fits its layers into what is free when it starts, less a margin (--fit-target). The
 # entrypoint works the margin out at every start, the container's restarts included, as the
@@ -16,6 +18,14 @@
 # whole model fits a 6.2 GB share. llama.cpp leaves the last layers off the card first, the 0.7 GB
 # output layer among them, and with those on the CPU it answers at a tenth of the speed
 # (ein/core#1016).
+#
+# The image is pinned by digest: a new llama.cpp build is a new measurement of its chat parsing, its
+# speed and its cache. The chat template, llm/qwen35-stable-history.jinja, is Qwen3.5's own with one
+# change: every assistant turn keeps the empty think block it was written with. The original drops
+# it from the turns before the latest question, which renders the previous round differently once a
+# new question arrives and throws that much of the cache away. Thinking is off on the server
+# (--chat-template-kwargs), so requests carry only standard fields. A hosted model in its place
+# (CFG_LLM_URL) brings its own template and defaults.
 services:
   llm:
     image: ${LLM_IMAGE:-ghcr.io/ggml-org/llama.cpp:server-cuda@sha256:bfb3264fc2166e01e2b4f9b537e45d7006d87c75021b911f132ef607f5bbced3}
@@ -27,7 +37,7 @@ services:
     memswap_limit: ${LLM_MEMORY:-10g}
     volumes:
       - ${EIN_DATA}/llm:/models:z
-      - ./src/llm/templates:/templates:ro,z
+      - ./llm:/templates:ro,z
     entrypoint:
       - /bin/sh
       - -c

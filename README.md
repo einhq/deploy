@@ -48,8 +48,9 @@ compose.supervisor.yaml the supervisor, which an installation from GitHub's einh
 supervisor/             the supervisor's image: its server, supervisor.py, and what setup.sh needs to run in it
 setup.sh                updates this folder, writes .env and compose.override.yaml, pulls or builds the images, starts
 
-src/                    the sources setup.sh fetches: ems and llm with their options, and core, db and
-                        module-devices from your own
+llm/                    the language model's chat template
+src/                    the sources setup.sh fetches: ems with its option, and core, db and module-devices
+                        from your own
 .env                    the settings, with the passwords made at the install
 compose.override.yaml   the options in .env as services, and podman's restart policy, written by setup.sh
 data/                   your files, the installed modules and the database, unless --data named another folder at the install
@@ -183,7 +184,7 @@ module: Settings → Modules does.
 ## Installing from your own Forgejo or Gitea
 
 Everything comes from GitHub's `einhq` unless `--source` names another organisation that has EiN's
-repositories under the same names: `deploy`, `core`, `db`, `ems`, `llm` and the `module-*` ones,
+repositories under the same names: `deploy`, `core`, `db`, `ems` and the `module-*` ones,
 such as a mirror on a Forgejo or a Gitea of your own, or the one EiN is developed on. Its token, when
 the repositories are private, is `EIN_SOURCE_KEY` in the environment; a token that reads repositories
 and organisations is enough. The installer takes both and fetches deploy from there too:

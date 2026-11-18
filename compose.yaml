@@ -68,6 +68,9 @@ services:
       CFG_LLM_URL: ${CFG_LLM_URL:-http://llm:8190}
       MODULE_INSTALL_PATH: /modules-installed
       INSTALL_MODULES: ${EIN_MODULES:-}
+      # Here as well as in env_file: podman-compose 1.0.6 hands env_file to podman, which keeps the
+      # quotes setup.sh writes around a chosen password, where compose's own reading drops them.
+      INITIAL_ADMIN_PASSWORD: ${INITIAL_ADMIN_PASSWORD:-}
       FILE_ROOT_PATH: /files
       VOLATILE_FILE_ROOT_PATH: /files-volatile
     mem_limit: ${EIN_MEMORY:-6g}

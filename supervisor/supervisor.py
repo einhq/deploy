@@ -30,6 +30,7 @@ import http.client
 import json
 import os
 import re
+import signal
 import socket
 import subprocess
 import sys
@@ -478,6 +479,9 @@ def serve():
         sys.exit('supervisor: SUPERVISOR_KEY is not set')
     follow_zone()
     threading.Thread(target=schedule, daemon=True).start()
+    # As the container's first process it would ignore the engine's SIGTERM and be killed 10 s later;
+    # a job runs in a container of its own, so stopping here leaves it running.
+    signal.signal(signal.SIGTERM, lambda *_: sys.exit(0))
     print(f'supervisor {VERSION}: answering on {PORT}', flush=True)
     ThreadingHTTPServer(('0.0.0.0', PORT), Handler).serve_forever()
 

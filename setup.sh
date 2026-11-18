@@ -190,7 +190,6 @@ main() {
   ! built || repos+=(core db)
   ! built || [ "$EIN_DEVICES" != 1 ] || repos+=(module-devices)
   [ "$EIN_EMS" != 1 ] || repos+=(ems)
-  [ "$EIN_LLM" != 1 ] || repos+=(llm)
   [ ${#repos[@]} = 0 ] || step "Fetching the sources"
   for repo in "${repos[@]}"; do fetch "$repo" "src/$repo"; done
 
@@ -241,7 +240,7 @@ update_one() {
     ems | llm)
       local option=EIN_${1^^}
       [ "${!option}" = 1 ] || fail "$1 is not installed here: ./setup.sh --$1 adds it"
-      fetch "$1" "src/$1"
+      [ "$1" = llm ] || fetch ems src/ems
       ;;
     devices)
       [ "$EIN_DEVICES" = 1 ] || fail "the devices sidecar is not installed here: ./setup.sh --devices adds it"
@@ -258,7 +257,7 @@ update_one() {
   tag=$(tag_of "$1")
   build "$1"
   [ "$1" != db ] || prepare_db_dir
-  # The model's image is pinned in its compose file, and its update is its templates under src/.
+  # The model's image is pinned in its compose file, and its update is that file and its template.
   if [ -n "${EIN_KEEP_CURRENT:-}" ] && [ "$1" != llm ] && [ -n "$ran" ] && [ "$ran" = "$(image_id "$1")" ]; then
     echo "$1 runs its newest image already"
     # Compose makes it again only when its definition changed; podman-compose 1.0 would make it
@@ -598,6 +597,9 @@ supervise() {
 }
 SUPERVISOR_IMAGE=ghcr.io/einhq/supervisor:main
 
+# Whether the container engine answers on the socket at this path.
+answers() { [ -S "$1" ] && curl -sf -o /dev/null --max-time 10 --unix-socket "$1" http://d/_ping; }
+
 # Whether an organisation's address is GitHub's einhq, which publishes the images.
 published() {
   local owner=${1##*/}
@@ -609,12 +611,13 @@ published() {
 # owns this folder: root in the container where the engine is this user's (rootless podman, whose
 # root in a container is this user), else this user with the socket's group (Docker's); this
 # folder's path; the key EiN asks with; and the image, pulled. False, saying why, without them.
+# podman's socket is started when it does not answer, which a file left by a stopped service does not.
 supervisor_settings() {
   local socket user=0:0 gid=
   if [ "$engine" = podman ]; then
     socket=$(podman info --format '{{.Host.RemoteSocket.Path}}')
     socket=${socket#unix://}
-    if [ ! -S "$socket" ]; then
+    if ! answers "$socket"; then
       local scope=(--user)
       [ "$(id -u)" != 0 ] || scope=()
       systemctl "${scope[@]}" enable --now podman.socket >/dev/null 2>&1 || true
@@ -624,8 +627,8 @@ supervisor_settings() {
     socket=${socket#unix://}
     socket=${socket:-/var/run/docker.sock}
   fi
-  if [ ! -S "$socket" ]; then
-    echo "The supervisor needs $engine's socket, which is not at $socket$([ "$engine" != podman ] || echo ": systemctl --user enable --now podman.socket makes it")"
+  if ! answers "$socket"; then
+    echo "The supervisor needs $engine's socket, which does not answer at $socket$([ "$engine" != podman ] || echo ": systemctl --user enable --now podman.socket makes it")"
     return 1
   fi
   if [ "$(id -u)" != 0 ] && [ "$(stat -c %u "$socket")" != "$(id -u)" ]; then
