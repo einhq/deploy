@@ -5,12 +5,13 @@ under Docker and the whole account under rootless podman, and EiN faces the netw
 modules' code. EiN reaches it on the compose network, with the key SUPERVISOR_KEY, and may ask
 three things, of a fixed set of services:
 
-  GET  /v0/status            each service: whether it is installed, its container, its image and
-                             the version of its interface; what the modules ask for; the job
+  GET  /v0/status            each service: whether it is installed, its container, its image, the
+                             release it runs and the newer one an update would install; what the
+                             modules ask for; the job
   POST /v0/install/<name>    install the media service (ems), the language model (llm) or the
                              devices sidecar (devices): `setup.sh --<name>`
-  POST /v0/update            update now, {"services": [...]} or every installed one:
-                             `setup.sh --only <names>`, which rolls a service back to the image it
+  POST /v0/update            update now, {"services": [...]} or every one with a newer release:
+                             `setup.sh --only <names>`, which rolls a service back to the version it
                              ran when the new one does not come up
 
 Each is a job: setup.sh, run in a container of this image beside this one, with the deploy folder
@@ -18,9 +19,16 @@ and the data folder mounted at their own paths, so compose reads them as setup.s
 does. The job's output and outcome are kept under the data folder (supervisor/), which is how the
 status reports a job that went on while this container was made again.
 
-Without being asked, once a minute: a service whose modules now ask for another line of it
-(mod.json's services, `"ems": "^0.4.4"`) is updated, and every installed service is at EIN_UPDATE_AT
-(.env, default 04:00, `off` for never), in the hour after it.
+Each service runs a release, an image GitHub builds once for it, at the version .env pins
+(EIN_CORE_VERSION and the like). Once an hour the supervisor reads which releases GitHub's registry
+has, and a service has an update when a newer one is there than the one it runs: the newest of the
+line its modules ask for (mod.json's services, `"ems": "^0.4.4"`) for the media service and the
+sidecar, the newest of all for EiN and the database, and deploy's newest release for the supervisor.
+The language model has one when compose.llm.yaml names another image than it runs.
+
+Without being asked, once a minute: a service whose modules now ask for another line of it is
+updated, and every service with an update is at EIN_UPDATE_AT (.env, default 04:00, `off` for
+never), in the hour after it.
 
 `supervisor job <setup.sh options>` is the job itself, run in that container.
 """
@@ -37,6 +45,7 @@ import sys
 import threading
 import time
 import urllib.parse
+import urllib.request
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 
@@ -44,16 +53,17 @@ VERSION = '0.1.0'
 SOCKET = '/run/engine.sock'
 PORT = int(os.environ.get('SUPERVISOR_PORT', '8199'))
 DEPLOY = Path(os.environ.get('EIN_DEPLOY', '/ein'))
-IMAGE = os.environ.get('SUPERVISOR_IMAGE', 'ghcr.io/einhq/supervisor:main')
 JOB = 'ein-supervisor-job'
 # The container setup.sh runs itself in when it is run on the machine.
 SETUP = 'ein-setup'
 LOG_LINES = 200
 
 # The services, in the order an update takes them: the supervisor last, since the job makes it
-# again. The optional ones are installed on request; core, db and the supervisor always are.
+# again. The optional ones are installed on request; core, db and the supervisor always are. Each
+# but the model is an einhq image with releases.
 ORDER = ['db', 'core', 'ems', 'devices', 'llm', 'supervisor']
 OPTIONAL = {'ems', 'llm', 'devices'}
+RELEASED = ['db', 'core', 'ems', 'devices', 'supervisor']
 TITLES = {
     'core': 'EiN',
     'db': 'the database',
@@ -86,7 +96,7 @@ def gives(name, env):
     if name == 'llm':
         return card + [f"up to {memory(env.get('LLM_MEMORY') or '10g')} of memory"]
     if name == 'devices':
-        ports = ', '.join(env.get(key) or default for key, default in (('MQTT_PORT', '1883'), ('STREAMS_PORT', '1984'), ('RTSP_PORT', '8554')))
+        ports = ', '.join(env.get(key) or default for key, default in (('MQTT_PORT', '1883'), ('STREAMS_PORT', '1984')))
         return [
             "this machine's network: it asks what is on it over mDNS and SSDP, and hears the devices' announcements",
             f"the ports {ports} on {env.get('EIN_BIND') or '0.0.0.0'}: the devices' MQTT broker, without TLS, and the cameras' streams",
@@ -179,8 +189,6 @@ def describe(name, env, listed, wanted):
         service['size'] = SIZES[name]
     if name in wanted:
         service['wanted'] = wanted[name]
-    if name in ('ems', 'devices'):
-        service['line'] = env.get(f'EIN_{name.upper()}_TAG') or 'main'
     container = listed.get(name)
     if not container:
         return service
@@ -195,10 +203,15 @@ def describe(name, env, listed, wanted):
     service['image'] = (inspected.get('Config') or {}).get('Image') or container.get('Image')
     image = engine(f"/images/{urllib.parse.quote(inspected.get('Image') or container.get('ImageID') or '', safe='')}/json") or {}
     labels = (image.get('Config') or {}).get('Labels') or {}
-    if labels.get('eu.einhq.api'):
-        service['version'] = labels['eu.einhq.api']
+    # Images from before releases said the media service's and the sidecar's version as eu.einhq.api.
+    version = labels.get('eu.einhq.version') or labels.get('eu.einhq.api')
+    if version:
+        service['version'] = version
     if image.get('Created'):
         service['built'] = image['Created']
+    newer = available(name, env, service.get('version'), service['image'], wanted)
+    if newer:
+        service['available'] = newer
     return service
 
 
@@ -230,6 +243,83 @@ def wanted_lines(env):
         lines = sorted({line_of(each['range'][1:]) for each in modules}, key=version_key)
         wanted[service] = {'line': lines[-1], 'modules': modules}
     return wanted
+
+
+# The releases GitHub's registry has of each einhq image, read once an hour (refresh), and the
+# newer one a service would be updated to.
+
+REGISTRY = 'https://ghcr.io'
+CHECK_EVERY = 3600
+releases = {}
+checked = {'at': None, 'error': None}
+
+
+def registry_versions(name):
+    """The release versions (x.y.z tags) the registry has of ghcr.io/einhq/<name>."""
+    with urllib.request.urlopen(f'{REGISTRY}/token?scope=repository:einhq/{name}:pull', timeout=30) as response:
+        token = json.load(response)['token']
+    request = urllib.request.Request(f'{REGISTRY}/v2/einhq/{name}/tags/list?n=10000', headers={'Authorization': f'Bearer {token}'})
+    with urllib.request.urlopen(request, timeout=30) as response:
+        tags = json.load(response).get('tags') or []
+    return sorted({tag for tag in tags if re.match(r'^\d+\.\d+\.\d+$', tag)}, key=version_key)
+
+
+def refresh():
+    """Every image's releases, read again; one the registry does not answer for keeps what it had."""
+    errors = []
+    for name in RELEASED:
+        try:
+            releases[name] = registry_versions(name)
+        except Exception as error:  # noqa: BLE001 - said in the status, and tried again in an hour
+            errors.append(f'{name}: {error}')
+    checked['at'] = time.time()
+    checked['error'] = '; '.join(errors) or None
+
+
+def newest(name, wanted):
+    """The newest release of a service, of the line its modules ask for (the media service and the
+    sidecar), or None when none is known."""
+    versions = releases.get(name) or []
+    line = (wanted.get(name) or {}).get('line')
+    if name in ('ems', 'devices') and line:
+        versions = [version for version in versions if line_of(version) == line]
+    return versions[-1] if versions else None
+
+
+def llm_image(env):
+    """The model's image compose would start: LLM_IMAGE in .env, or compose.llm.yaml's own."""
+    if env.get('LLM_IMAGE'):
+        return env['LLM_IMAGE']
+    try:
+        match = re.search(r'^\s*image:\s*\$\{LLM_IMAGE:-([^}]+)\}', (DEPLOY / 'compose.llm.yaml').read_text(), re.M)
+    except OSError:
+        return None
+    return match.group(1) if match else None
+
+
+def available(name, env, version, image, wanted):
+    """What an update of a service would install that it does not run: {version, image} for a newer
+    release, {image} for the model's other image; None when it runs the newest."""
+    if name == 'llm':
+        named = llm_image(env)
+        return {'image': named} if named and named != image else None
+    if name not in RELEASED:
+        return None
+    candidate = newest(name, wanted)
+    if not candidate:
+        return None
+    # A container from before releases runs :main or a line, which its update pins.
+    pinned = re.match(rf'^ghcr\.io/einhq/{name}:\d+\.\d+\.\d+$', image or '')
+    if pinned and version and version_key(candidate) <= version_key(version):
+        return None
+    return {'version': candidate, 'image': f'ghcr.io/einhq/{name}:{candidate}'}
+
+
+def updatable(env):
+    """The installed services with something to install, in the order an update takes them."""
+    listed = containers()
+    wanted = wanted_lines(env)
+    return [name for name in ORDER if installed(name, env) and listed.get(name) and describe(name, env, listed, wanted).get('available')]
 
 
 # Jobs: setup.sh in a container of this image.
@@ -300,8 +390,10 @@ def start_job(args, by):
             command += ['--group-add', env['EIN_SOCKET_GID']]
         for mount in mounts:
             command += ['-v', mount]
-        # A service on its newest image already stays as it is.
-        command += ['-e', f'EIN_DEPLOY={DEPLOY}', '-e', 'EIN_SUPERVISOR_JOB=1', '-e', 'EIN_KEEP_CURRENT=1', '-w', str(DEPLOY), IMAGE, 'job', *args]
+        # A service on its newest release already stays as it is. The job runs in the supervisor's
+        # release .env pins now, which an update of the supervisor moves before it makes it again.
+        image = f"ghcr.io/einhq/supervisor:{env['EIN_SUPERVISOR_VERSION']}" if env.get('EIN_SUPERVISOR_VERSION') else os.environ['SUPERVISOR_IMAGE']
+        command += ['-e', f'EIN_DEPLOY={DEPLOY}', '-e', 'EIN_SUPERVISOR_JOB=1', '-e', 'EIN_KEEP_CURRENT=1', '-w', str(DEPLOY), image, 'job', *args]
         result = subprocess.run(command, capture_output=True, text=True)
         if result.returncode != 0:
             (folder / 'job.log').write_text(result.stdout + result.stderr)
@@ -321,25 +413,33 @@ def run_job(args):
     return code
 
 
-# Unasked: a service whose modules ask for another line, and the nightly update.
+# Unasked: the registry read again, a service whose modules ask for another line, and the nightly
+# update.
 
-tried_lines = {}
+tried = {}
 
 
 def tick():
+    if checked['at'] is None or time.time() - checked['at'] >= CHECK_EVERY:
+        refresh()
     env = read_env()
     if busy():
         return
+    listed = containers()
     wanted = wanted_lines(env)
     for name in ('ems', 'devices'):
-        line = (wanted.get(name) or {}).get('line')
-        if not installed(name, env) or not line or line == (env.get(f'EIN_{name.upper()}_TAG') or 'main'):
+        if not installed(name, env) or not listed.get(name):
             continue
-        # A line not published yet stays unpublished for a while: asked again a day later.
-        if time.time() - tried_lines.get((name, line), 0) < 86400:
+        service = describe(name, env, listed, wanted)
+        newer = (service.get('available') or {}).get('version')
+        running = service.get('version')
+        if not newer or (running and line_of(running) == line_of(newer)):
             continue
-        tried_lines[(name, line)] = time.time()
-        start_job(['--only', name], f'the supervisor: the modules ask for {TITLES[name]} {line}')
+        # A release that did not come up is tried again a day later.
+        if time.time() - tried.get((name, newer), 0) < 86400:
+            continue
+        tried[(name, newer)] = time.time()
+        start_job(['--only', name], f'the supervisor: the modules ask for {TITLES[name]} {line_of(newer)}')
         return
     at = env.get('EIN_UPDATE_AT', '04:00')
     match = re.match(r'^(\d{1,2}):(\d{2})$', at)
@@ -354,8 +454,9 @@ def tick():
     if marker.exists() and marker.read_text().strip() == today:
         return
     marker.write_text(today)
-    names = [name for name in ORDER if installed(name, env)]
-    start_job(['--only', ','.join(names)], 'the supervisor: the nightly update')
+    names = updatable(env)
+    if names:
+        start_job(['--only', ','.join(names)], 'the supervisor: the nightly update')
 
 
 def follow_zone():
@@ -385,6 +486,8 @@ def status():
     env = read_env()
     listed = containers()
     wanted = wanted_lines(env)
+    if checked['at'] is None:
+        threading.Thread(target=refresh, daemon=True).start()
     services = [describe(name, env, listed, wanted) for name in ORDER]
     # A service a module names that the supervisor does not know is reported as such, not installed.
     for name in sorted(set(wanted) - set(ORDER)):
@@ -394,6 +497,8 @@ def status():
         'version': VERSION,
         'engine': env.get('EIN_ENGINE') or 'podman',
         'updateAt': None if at == 'off' else at,
+        'checkedAt': time.strftime('%Y-%m-%dT%H:%M:%S%z', time.localtime(checked['at'])) if checked['at'] else None,
+        'checkError': checked['error'],
         'services': services,
         'job': job_status(env),
     }
@@ -457,7 +562,9 @@ class Handler(BaseHTTPRequestHandler):
                     return self.answer(409, {'error': f'{TITLES[name]} is installed already'})
                 return self.answer(202, {'job': start_job([f'--{name}'], by)})
             if self.path == '/v0/update':
-                names = body.get('services') or [name for name in ORDER if installed(name, env)]
+                names = body.get('services') or updatable(env)
+                if not names:
+                    return self.answer(409, {'error': 'every service runs its newest release'})
                 if not isinstance(names, list) or not all(isinstance(name, str) for name in names):
                     return self.answer(400, {'error': 'services is a list of names'})
                 for name in names:

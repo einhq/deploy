@@ -23,7 +23,7 @@ any time after:
 ./setup.sh --devices          # the Devices module's sidecar: an MQTT broker for its devices on port 1883,
                               # a listener for devices on the network, a restreamer for cameras
 ./setup.sh --module archive   # a module, which EiN installs at its start with the modules it needs (archive needs ems)
-./setup.sh                    # update: this folder and the newest images, pulled and restarted
+./setup.sh                    # update: this folder and the newest releases, pulled and restarted
 ./setup.sh --only core        # update one service, core, ems, db, llm, devices or supervisor, and restart
                               # only it; --only core,db several
 ./setup.sh --no-supervisor    # leave the supervisor out (below); --supervisor adds it again
@@ -57,31 +57,33 @@ data/                   your files, the installed modules and the database, unle
 ```
 
 The last four are made here and are not in the repository. Every run of `setup.sh` first brings this
-folder up to date from the source's `deploy` (a fast-forward `git pull`), and runs the new `setup.sh`
-when that changed it, so an update takes the compose files and the script as they are now. A local
-commit or change here that the pull cannot pass stops it, and `git status` says why. One run at a time:
-a second waits for the first to end, under `flock` on this folder.
+folder up to date, and runs the new `setup.sh` when that changed it, so an update takes the compose
+files and the script as they are now: from GitHub's `einhq` it moves to deploy's newest release (the
+tag `v0.1.2`, say) whose supervisor image GitHub has built, and from another source to the newest
+commit of its `main` (a fast-forward `git pull`). A local commit or change here that this cannot
+pass stops it, and `git status` says why. One run at a time: a second waits for the first to end,
+under `flock` on this folder.
 
-The images are pulled: GitHub builds them from the `main` of their repositories when the daily
-publish moves it, EiN's as `ghcr.io/einhq/core:main` with the web interface built in, the
-database's as `ghcr.io/einhq/db:main` (and again every week, for PostgreSQL's minor releases) and
-the media service's as `ghcr.io/einhq/ems`; the devices sidecar's, `ghcr.io/einhq/devices`, is
-built when its folder in module-devices changes, and the supervisor's, `ghcr.io/einhq/supervisor`,
-when `supervisor/` or the version here does. From another source they are built here instead
-(below). The model's is llama.cpp's own.
+Core, the database, the media service, this repository (with the supervisor) and the devices
+sidecar have releases: each keeps its version in `version.json` (module-devices' in
+`sidecar/version.json`), which the daily publish raises as their commits since the last release
+call for. GitHub builds each release once, from its tag, and never again: EiN's as
+`ghcr.io/einhq/core:0.1.1` with the web interface built in, the database's as `ghcr.io/einhq/db`,
+the media service's as `ghcr.io/einhq/ems`, the sidecar's as `ghcr.io/einhq/devices` and the
+supervisor's as `ghcr.io/einhq/supervisor`, each saying its version in the `eu.einhq.version`
+label. There is no `:main`: a version names one image. From another source they are built here
+instead (below). The model's is llama.cpp's own, named by digest in `compose.llm.yaml`.
 
-Core, the database, this repository (with the supervisor) and the language model keep their
-version in `version.json`, which the publish releases as their commits call for; the images are
-tagged with it and its line as well as `:main` (`core:0.1.0` and `core:0.1`), and say it in their
-`eu.einhq.version` label.
-
-The media service and the sidecar are tagged with the version of what they offer EiN and with its
-line (`ems:0.4.4` and `ems:0.4`, the newest of the 0.4 versions), and pulled at the line the modules
-installed in the data folder ask for in their `mod.json` (`"services": { "ems": "^0.4.4" }`), kept in
-`.env` as `EIN_EMS_TAG` and `EIN_DEVICES_TAG`; `:main` until a module asks. A run after EiN
-comes up pulls a line its modules ask for then, and restarts that service; a line not published yet
-leaves the service at the one it has. `./setup.sh --only ems` is the update after a module's, when
-EiN's Status page says the media service is too old for it.
+`.env` pins the release each service runs: `EIN_CORE_VERSION`, `EIN_DB_VERSION`,
+`EIN_EMS_VERSION`, `EIN_DEVICES_VERSION` and `EIN_SUPERVISOR_VERSION`, which the compose files
+read. A run pins each to the newest release on GitHub's registry and pulls it: EiN and the database
+the newest of all, the supervisor this folder's own, and the media service and the sidecar the
+newest of the line the modules installed in the data folder ask for in their `mod.json`
+(`"services": { "ems": "^0.4.4" }`: the newest 0.4). A run after EiN comes up pins a line its
+modules ask for then, and restarts that service; a line not published yet leaves the service at the
+version it has. `./setup.sh --only ems` is the update after a module's, when EiN's Status page says
+the media service is too old for it. An installation from before releases ran `:main` and lines
+(`EIN_EMS_TAG`): its first update pins them, and removes the images they named.
 
 Back up `.env` and the data folder, which holds the database too, unless `--db-dir` put it
 elsewhere (below).
@@ -100,9 +102,12 @@ service, or how each stands. Settings → Modules in EiN shows them, and `superv
 It does each as a job, `setup.sh` with the options for it, run in a container of its own image
 (`supervisor/`, `ghcr.io/einhq/supervisor`) with this folder and the data folder mounted at their
 own paths, which goes on while the supervisor is made again; its output is in `supervisor/` in the
-data folder. Unasked, it updates the media service or the sidecar within a minute of a module asking
-for another line of it, and every service each night at `EIN_UPDATE_AT` (04:00; `off` for never).
-Its updates leave a service that runs its newest image as it is.
+data folder. Once an hour it reads which releases GitHub's registry has, and says of each service
+the newer release an update would install, when there is one; the model has one when
+`compose.llm.yaml` names another image than it runs. Unasked, it updates the media service or the
+sidecar within a minute of a module asking for another line of it, and each night at
+`EIN_UPDATE_AT` (04:00; `off` for never) every service that has an update. Its updates leave a
+service that runs its newest release as it is.
 
 With the supervisor, every `setup.sh` runs in its image, the one run here too: this machine needs the
 engine and its socket alone (setup.sh turns on `podman.socket` under podman), and the services are
@@ -111,9 +116,9 @@ podman-compose 1.0.6, and Docker's CLI with its compose.
 
 From another source the images are built here, and there is no supervisor.
 
-`--only` puts a service whose new image does not come up (EiN does not answer, the database or the
-media service is not healthy, another service stops or restarts) back on the image it ran, and
-fails, saying so.
+`--only` puts a service whose new image does not come up (EiN does not answer, the database, the
+media service or the model is not healthy, another service stops or restarts) back on the image it
+ran, and fails, saying so.
 
 ## Running it
 
@@ -269,13 +274,11 @@ can take as devices (Devices → _found_). A Shelly is added from there: EiN giv
 address and the `device` account itself. It sends multicast on the network this machine is on, and
 nothing leaves it.
 
-Its restreamer, go2rtc, keeps one connection to each camera EiN has and serves it again: to EiN,
-which shows it in the browser, on `STREAMS_PORT` (1984), and over RTSP on `RTSP_PORT` (8554), where
-the media service reads it to watch it for faces, both behind the account `ein` and
-`STREAMS_PASSWORD`. A media service on another machine reads it at this machine's address on the
-network: set `CFG_DEVICES_STREAMS_RTSP` in `.env` to `rtsp://<this machine>:8554`. EiN gives it the cameras itself; the camera's own password stays with EiN and the sidecar.
-On this machine RTSP lets anyone in without a password, as go2rtc does for every local client. Keep
-these ports off the internet too.
+Its restreamer, go2rtc, keeps one connection to each camera EiN has and serves it again to EiN on
+`STREAMS_PORT` (1984), behind the account `ein` and `STREAMS_PASSWORD`: EiN shows it in the browser
+and writes it into the camera's stream nodes, which the media service reads through EiN as it reads
+any file, on this machine or another. EiN gives it the cameras itself; the camera's own password
+stays with EiN and the sidecar. Keep these ports off the internet too.
 
 Under Docker and rootful podman, EiN reaches the sidecar at this machine's address on the compose
 network, so it needs `EIN_BIND` to be `0.0.0.0`; `setup.sh` says so when it is not.

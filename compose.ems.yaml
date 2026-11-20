@@ -6,11 +6,12 @@
 # capabilities, and every request that names a file would wait as files_unavailable.
 # It reads .env as its environment, so an EMS_ line added there reaches it at the next `up -d`.
 #
-# The image is the one GitHub publishes from ein/ems. From any source but GitHub's einhq,
-# compose.override.yaml builds it here instead, as localhost/ein-ems from src/ems.
+# The image is the release GitHub publishes from ein/ems that .env pins, EIN_EMS_VERSION. From any
+# source but GitHub's einhq, compose.override.yaml builds it here instead, as localhost/ein-ems from
+# src/ems.
 services:
   ems:
-    image: ghcr.io/einhq/ems:main
+    image: ghcr.io/einhq/ems:${EIN_EMS_VERSION:-unpinned}
     restart: unless-stopped
     stop_grace_period: 60s
     cap_add: [SYS_ADMIN]

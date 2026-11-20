@@ -26,10 +26,19 @@
 # new question arrives and throws that much of the cache away. Thinking is off on the server
 # (--chat-template-kwargs), so requests carry only standard fields. A hosted model in its place
 # (CFG_LLM_URL) brings its own template and defaults.
+#
+# The health check asks the server's port: the image's own asks 8080, which nothing serves here.
+# Its start period covers the first start, which fetches the model.
 services:
   llm:
     image: ${LLM_IMAGE:-ghcr.io/ggml-org/llama.cpp:server-cuda@sha256:bfb3264fc2166e01e2b4f9b537e45d7006d87c75021b911f132ef607f5bbced3}
     restart: unless-stopped
+    healthcheck:
+      test: [CMD, curl, -fsS, -o, /dev/null, http://localhost:8190/health]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 900s
     environment:
       LLAMA_CACHE: /models
       LLM_CARD_RESERVE_MB: ${LLM_CARD_RESERVE_MB:-8800}

@@ -8,14 +8,18 @@
 #   the devices' announcements, in EIN_DATA/mqtt across restarts;
 # - a listener for what announces itself on this machine's network, published on the broker for the
 #   Devices module to offer as devices;
-# - a restreamer (go2rtc) for cameras: one connection to each camera, served again to EiN's pages
-#   and to the media service. Its API is on STREAMS_PORT and its RTSP on RTSP_PORT, both of EIN_BIND
-#   behind the account `ein` and STREAMS_PASSWORD.
+# - a restreamer (go2rtc) for cameras: one connection to each camera, served again to EiN, which
+#   shows it in its pages and writes it into the camera's stream nodes for the media service. Its API
+#   is on STREAMS_PORT of EIN_BIND, behind the account `ein` and STREAMS_PASSWORD.
 #
 # It is on the host's network: the listener's multicast never leaves the network it is sent on.
+#
+# The image is the release GitHub publishes from module-devices that .env pins, EIN_DEVICES_VERSION.
+# From any source but GitHub's einhq, compose.override.yaml builds it here instead, as
+# localhost/ein-devices from src/module-devices/sidecar.
 services:
   devices:
-    image: ${DEVICES_IMAGE:-ghcr.io/einhq/devices:main}
+    image: ghcr.io/einhq/devices:${EIN_DEVICES_VERSION:-unpinned}
     restart: unless-stopped
     network_mode: host
     mem_limit: 512m
@@ -28,5 +32,4 @@ services:
       MQTT_EIN_PASSWORD: ${MQTT_EIN_PASSWORD}
       MQTT_DEVICE_PASSWORD: ${MQTT_DEVICE_PASSWORD}
       STREAMS_PORT: ${STREAMS_PORT:-1984}
-      RTSP_PORT: ${RTSP_PORT:-8554}
       STREAMS_PASSWORD: ${STREAMS_PASSWORD}

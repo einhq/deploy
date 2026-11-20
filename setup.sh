@@ -3,7 +3,7 @@
 # the source's deploy, writes .env the first time, fetches the sources it needs under src/, pulls
 # the images or builds them from those sources, and starts them with compose.
 #
-#   ./setup.sh                    EiN and its database; run again, the newest sources of what is here
+#   ./setup.sh                    EiN and its database; run again, the newest release of what is here
 #   ./setup.sh --ems              also the media service: every media tool and model, about 30 GB
 #   ./setup.sh --llm              also the assistant's language model
 #   ./setup.sh --devices          also the Devices module's sidecar: an MQTT broker for its devices,
@@ -45,14 +45,18 @@
 # environment is the token that reads the source, when its repositories are private; it is kept in
 # .env with the source, and a --source on another host without a token of its own drops it.
 #
-# The media service and the sidecar are pulled at the version line the installed modules ask for in
-# their mod.json (`"services": { "ems": "^0.4.4" }`: the line 0.4, the image ghcr.io/einhq/ems:0.4),
-# kept in .env as EIN_EMS_TAG and EIN_DEVICES_TAG, and :main before any module asks. A run after
-# a module's update in EiN pulls the line it asks for then.
+# From GitHub's einhq every service runs a release, an image GitHub builds once for it and never
+# again, at the version .env pins: EIN_CORE_VERSION, EIN_DB_VERSION, EIN_EMS_VERSION,
+# EIN_DEVICES_VERSION and EIN_SUPERVISOR_VERSION (ghcr.io/einhq/core:0.1.1). A run pins each to the
+# newest release GitHub's registry has: the media service and the sidecar the newest of the line the
+# installed modules ask for in their mod.json (`"services": { "ems": "^0.4.4" }`: the line 0.4), and
+# the supervisor the release of this folder. A run after a module's update in EiN pins the line it
+# asks for then. This folder itself is moved to the newest release of deploy whose supervisor
+# GitHub has built.
 #
-# --only puts a service whose new image does not come up back on the image it ran, and fails, saying
-# so. Run by the supervisor (EIN_KEEP_CURRENT=1), it leaves a service that runs its newest image as
-# it is; run here, it starts it again, so a setting changed in .env takes effect.
+# --only puts a service whose new image does not come up back on the version it ran, and fails,
+# saying so. Run by the supervisor (EIN_KEEP_CURRENT=1), it leaves a service that runs its newest
+# release as it is; run here, it starts it again, so a setting changed in .env takes effect.
 #
 # An installation from GitHub's einhq has the supervisor (compose.supervisor.yaml), unless
 # --no-supervisor leaves it out: a container holding the engine's socket, which installs the media
@@ -70,7 +74,7 @@ cd "$here"
 
 main() {
   local args=("$@") want_ems= want_llm= want_devices= modules=() source= db_dir= only= key=${EIN_SOURCE_KEY:-} options=0 unknown=
-  local http_port= ssh_port= bind= want_supervisor=
+  local http_port= ssh_port= bind= want_supervisor= updating=
   data_dir= want_engine=
   while [ $# -gt 0 ]; do
     case $1 in
@@ -147,16 +151,28 @@ main() {
     [ "$options" = 0 ] || fail "--only updates what is installed: give the other options without it"
     [ -f .env ] || fail "--only updates an installation: run ./setup.sh first"
     load_env
-    # podman-compose 1.0 hashes the whole project's config: after a change to any compose file,
-    # starting one service makes every container again, with that one's swap limit, which the
-    # database's start refuses. Then every service starts again, each on its own (start).
+    # podman-compose 1.0 hashes the whole project's config: after a change to any compose file, or
+    # to a version .env pins, starting one service makes every container again, with that one's
+    # swap limit, which the database's start refuses. So the services named are pinned first, and
+    # when that or anything else changed the config, every service starts again, each on its own
+    # (start), and only those named are updated.
     write_override
+    local service option
+    if [ "$compose_tool" = podman-compose ] && ! built; then
+      for service in ${only//,/ }; do
+        option=EIN_${service^^}
+        case $service in
+          core | db) pin_newest "$service" ;;
+          ems | devices | supervisor) [ "${!option:-0}" != 1 ] || pin_newest "$service" ;;
+        esac
+      done
+    fi
     if [ "$compose_tool" != podman-compose ] || [ "$(config_hash)" = "$(running_hash)" ]; then
-      local service
       for service in ${only//,/ }; do update_one "$service"; done
       return
     fi
-    echo "The compose files changed, so every service is updated and started again, not ${only//,/ and } alone"
+    echo "The compose files changed, so every service is started again, and ${only//,/ and } updated"
+    built || updating=${only//,/ }
   fi
 
   if [ -f .env ]; then
@@ -196,7 +212,8 @@ main() {
   step "Getting the images$([ "$EIN_EMS" != 1 ] || echo ' (the media service the first time: about 30 GB)')"
   local old
   old=$(built_images)
-  build
+  # shellcheck disable=SC2086
+  build ${updating:-}
 
   step "Starting EiN"
   mkdir -p "$EIN_DATA"/{files,old,files-volatile,llm,modules}
@@ -221,8 +238,8 @@ main() {
   fi
   check_db_mount
   wait_for_ein || exit 1
-  follow_lines
-  drop_main_tags
+  follow_modules
+  drop_old_names
   remove_replaced $old
   [ -n "${EIN_SUPERVISOR_JOB:-}" ] || after_reboot
   modules_report
@@ -231,7 +248,7 @@ main() {
 
 # One service fetched, built and restarted, the others left running: an update of EiN alone does not
 # restart the media service, the model or the database. One whose new image does not come up goes
-# back to the image it ran, and one that runs its newest image already is left as it is when
+# back to the version it ran, and one that runs its newest release already is left as it is when
 # EIN_KEEP_CURRENT is set, as the supervisor's runs set it.
 update_one() {
   case $1 in
@@ -251,25 +268,26 @@ update_one() {
     *) fail "--only takes core, ems, db, llm, devices or supervisor, not $1" ;;
   esac
   step "Getting $1's image"
-  local old ran tag
+  local old ran version
   old=$(built_images)
   ran=$(running_image "$1")
-  tag=$(tag_of "$1")
+  version=$(pinned "$1")
   build "$1"
   [ "$1" != db ] || prepare_db_dir
   # The model's image is pinned in its compose file, and its update is that file and its template.
-  if [ -n "${EIN_KEEP_CURRENT:-}" ] && [ "$1" != llm ] && [ -n "$ran" ] && [ "$ran" = "$(image_id "$1")" ]; then
-    echo "$1 runs its newest image already"
+  if [ -n "${EIN_KEEP_CURRENT:-}" ] && [ "$1" != llm ] && [ -n "$ran" ] && [ "$ran" = "$(image_id "$1")" ] &&
+    [ "$(running_name "$1")" = "$(image_of "$1")" ]; then
+    echo "$1 runs its newest release already${version:+, $version}"
     # Compose makes it again only when its definition changed; podman-compose 1.0 would make it
     # again whatever, and its changed definition takes the whole project again (main).
     [ "$compose_tool" = podman-compose ] || compose up -d --no-deps "$1"
   else
     restart_service "$1"
-    came_up "$1" || roll_back "$1" "$ran" "$tag"
-    echo "$1 is up on its new image"
+    came_up "$1" || roll_back "$1" "$ran" "$version"
+    echo "$1 is up on its new image$([ -z "$(pinned "$1")" ] || echo ", $(pinned "$1")")"
   fi
   [ "$1" != core ] || modules_report
-  drop_main_tags
+  drop_old_names
   remove_replaced $old
 }
 
@@ -278,12 +296,12 @@ update_one() {
 restart_service() { if [ "$1" = db ]; then recreate core db; else recreate "$1"; fi; }
 
 # Whether a service came up on the image it was made again from: EiN answers, the database and the
-# media service report healthy, and the others run without restarting.
+# media service and the model report healthy, and the others run without restarting.
 came_up() {
   case $1 in
     core) wait_for_ein ;;
     db) container_up db 300 && check_db_mount && wait_for_ein ;;
-    ems) container_up ems 900 ;;
+    ems | llm) container_up "$1" 900 ;;
     *) container_up "$1" 60 ;;
   esac
 }
@@ -312,20 +330,16 @@ container_up() {
   return 1
 }
 
-# A service whose new image did not come up, put back on the image it ran (ran), at the line it was
-# at (tag). The update fails, saying so; the new image goes.
+# A service whose new image did not come up, put back on the image it ran (ran), at the version it
+# was pinned to (version). The update fails, saying so; the new image goes.
 roll_back() {
-  local service=$1 ran=$2 tag=$3 new id
+  local service=$1 ran=$2 version=$3 new id
   [ -n "$ran" ] && [ "$service" != llm ] || fail "$service did not come up: $engine compose logs $service"
   id=$(service_container "$service")
   [ -z "$id" ] || { echo "Its log:"; "$engine" logs --tail 30 "$id" 2>&1 | sed 's/^/  /'; } >&2
   step "Putting $service back on the image it ran"
   new=$(image_id "$service")
-  if [ "$tag" != "$(tag_of "$service")" ]; then
-    set_env "EIN_${service^^}_TAG" "$tag"
-    printf -v "EIN_${service^^}_TAG" %s "$tag"
-    write_override
-  fi
+  [ -z "$version" ] || [ "$version" = "$(pinned "$service")" ] || pin "$service" "$version"
   "$engine" tag "$ran" "$(image_of "$service")"
   restart_service "$service"
   came_up "$service" || fail "$service does not come up on the image it ran before either: $engine compose logs $service"
@@ -341,6 +355,12 @@ running_image() {
   [ -z "$id" ] || "$engine" inspect --format '{{.Image}}' "$id"
 }
 image_id() { "$engine" image inspect --format '{{.Id}}' "$(image_of "$1")" 2>/dev/null || true; }
+# The name of the image a service's container was made from: one from before releases names :main.
+running_name() {
+  local id
+  id=$(service_container "$1")
+  [ -z "$id" ] || "$engine" inspect --format '{{.Config.Image}}' "$id" | sed 's/:latest$//'
+}
 
 # The services' containers replaced by new ones from their images, and nothing else touched. Not
 # compose's own --force-recreate: podman-compose 1.0 takes the services' dependencies down with
@@ -453,68 +473,118 @@ wanted_line() {
 }
 
 # The version of a service's source under src/, which a built image has: the media service's
-# API_VERSION, the sidecar's VERSION.
+# version.json, the sidecar's.
 source_version() {
   case $1 in
-    ems) [ ! -f src/ems/ems/__init__.py ] || sed -n 's/^API_VERSION = "\([0-9.]*\)"$/\1/p' src/ems/ems/__init__.py ;;
-    devices) [ ! -f src/module-devices/sidecar/discovery.ts ] || sed -n "s/^export const VERSION = '\([0-9.]*\)';$/\1/p" src/module-devices/sidecar/discovery.ts ;;
+    ems) json_field version src/ems/version.json ;;
+    devices) json_field version src/module-devices/sidecar/version.json ;;
   esac
 }
 
-# Each service installed here at the line its modules ask for, pulled and started again when it is
-# at another; a line not published yet leaves it as it is. Built, the source is main's: what it is
+# Each service installed here pinned to the newest release of the line its modules ask for, once EiN
+# has installed them, and started again when that moved it. Built, the source is main's: what it is
 # and what the modules ask for are only compared.
-follow_lines() {
+follow_modules() {
   local service option line version
   for service in ems devices; do
     option=EIN_${service^^}
     [ "${!option:-0}" = 1 ] || continue
-    line=$(wanted_line "$service")
-    [ -n "$line" ] || continue
     if built; then
+      line=$(wanted_line "$service")
       version=$(source_version "$service")
-      [ -z "$version" ] || [ "$(line_of "$version")" = "$line" ] ||
+      [ -z "$line" ] || [ -z "$version" ] || [ "$(line_of "$version")" = "$line" ] ||
         echo "The modules here ask for $service $line, and its source is $version: their checks in EiN say which is behind"
       continue
     fi
-    option=EIN_${service^^}_TAG
-    [ "$line" != "${!option:-main}" ] || continue
-    step "Getting $service $line, which the modules ask for"
-    pull_service "$service" && recreate "$service"
+    version=$(pinned "$service")
+    pin_newest "$service"
+    [ "$(pinned "$service")" != "$version" ] || continue
+    step "Starting $service $(pinned "$service"), which the modules ask for"
+    recreate "$service"
   done
 }
 
-# A service's image pulled at the line its modules ask for, or at the one it has when that line is
-# not published (yet: a module's release can come before its service's image), or :main when it has
-# none. False when its tag stayed.
-pull_service() {
-  local option=EIN_${1^^}_TAG line
-  line=$(wanted_line "$1")
-  if [ -n "$line" ] && [ "$line" != "${!option:-main}" ]; then
-    if "$engine" pull "ghcr.io/einhq/$1:$line"; then
-      set_env "$option" "$line"
-      printf -v "$option" %s "$line"
-      write_override
-      return 0
-    fi
-    echo "The modules here ask for $1 $line, which is not published yet: it stays at ${!option:-main}"
+# The release versions GitHub's registry has of an einhq image, x.y.z a line, oldest first; false
+# when the registry does not answer.
+published_versions() {
+  local token tags
+  token=$(curl -fsS --max-time 30 "https://ghcr.io/token?scope=repository:einhq/$1:pull" | sed -n 's/.*"token" *: *"\([^"]*\)".*/\1/p') &&
+    [ -n "$token" ] || return 1
+  tags=$(curl -fsS --max-time 30 -H "Authorization: Bearer $token" "https://ghcr.io/v2/einhq/$1/tags/list?n=10000") || return 1
+  grep -o '"[0-9][0-9]*\.[0-9][0-9]*\.[0-9][0-9]*"' <<<"$tags" | tr -d '"' | sort -uV || true
+}
+
+# Whether version $1 is $2 or older.
+version_at_most() { [ "$(printf '%s\n%s\n' "$1" "$2" | sort -V | head -1)" = "$1" ]; }
+
+# This folder's release, its version.json.
+deploy_version() { json_field version version.json; }
+
+# The release a service is to run, of those published: the newest of the line its modules ask for
+# (the media service and the sidecar; the newest of all when none asks), this folder's or the newest
+# before it (the supervisor, built from it), the newest of all (EiN and its database). Nothing when
+# none is; false when the registry does not answer.
+newest_release() {
+  local versions line
+  versions=$(published_versions "$1") || return 1
+  case $1 in
+    ems | devices)
+      line=$(wanted_line "$1")
+      [ -z "$line" ] || versions=$(grep -E "^${line//./\\.}\." <<<"$versions" || true)
+      ;;
+    supervisor)
+      local version kept=()
+      for version in $versions; do ! version_at_most "$version" "$(deploy_version)" || kept+=("$version"); done
+      versions=$(printf '%s\n' "${kept[@]}")
+      ;;
+  esac
+  tail -1 <<<"$versions"
+}
+
+# The version .env pins a service to, and pinning it: kept in .env and in this script's environment,
+# which compose reads before .env.
+pinned() { local option=EIN_${1^^}_VERSION; echo "${!option:-}"; }
+pin() {
+  local option=EIN_${1^^}_VERSION
+  set_env "$option" "$2"
+  export "$option=$2"
+}
+
+# A service pinned to its newest release, and its image pulled. Where the registry does not answer,
+# or has no release of the line its modules ask for (yet: a module's release can come before its
+# service's image), it stays at the version it has, and says so; a service with none fails.
+pin_newest() {
+  local newest
+  if ! newest=$(newest_release "$1"); then
+    echo "GitHub's registry did not answer for $1$([ -z "$(pinned "$1")" ] || echo ": it stays at $(pinned "$1")")"
+  elif [ -z "$newest" ] && [ -n "$(wanted_line "$1")" ]; then
+    echo "The modules here ask for $1 $(wanted_line "$1"), which is not published yet$([ -z "$(pinned "$1")" ] || echo ": it stays at $(pinned "$1")")"
+  elif [ -n "$newest" ] && [ "$newest" != "$(pinned "$1")" ]; then
+    echo "  $1 $newest$([ -z "$(pinned "$1")" ] || echo ", after $(pinned "$1")")"
+    pin "$1" "$newest"
   fi
-  # Called where a failure does not stop the script, so it stops it itself.
-  "$engine" pull "$(image_of "$1")" || fail "$(image_of "$1") could not be pulled"
-  return 1
+  [ -n "$(pinned "$1")" ] || fail "no release of $1 could be had from GitHub's registry"
+  # A release is never built again, so the image here is it.
+  "$engine" image inspect "$(image_of "$1")" >/dev/null 2>&1 || "$engine" pull "$(image_of "$1")" ||
+    fail "$(image_of "$1") could not be pulled"
 }
 
-# The name :main taken off the images of the services that run at a line now, so the image it named
-# goes with the others replaced.
-drop_main_tags() {
-  local service option
+# The names of the services' images other than the release each runs taken off (an older release,
+# and :main and the lines of an installation from before releases), so the images they named go
+# with the others replaced. A name a container still uses stays.
+drop_old_names() {
+  local service name
   built && return 0
-  for service in ems devices; do
-    option=EIN_${service^^}_TAG
-    [ -n "${!option:-}" ] && [ "${!option}" != main ] || continue
-    "$engine" image inspect "ghcr.io/einhq/$service:main" >/dev/null 2>&1 || continue
-    "$engine" rmi "ghcr.io/einhq/$service:main" >/dev/null 2>&1 || true
+  for service in core db ems devices supervisor; do
+    [ -n "$(pinned "$service")" ] || continue
+    while read -r name; do
+      [ -n "$name" ] && [ "$name" != "ghcr.io/einhq/$service:$(pinned "$service")" ] || continue
+      "$engine" rmi "$name" >/dev/null 2>&1 || true
+    done < <("$engine" images --format '{{.Repository}}:{{.Tag}}' "ghcr.io/einhq/$service" 2>/dev/null)
   done
+  # Their lines, from before releases.
+  unset_env EIN_EMS_TAG
+  unset_env EIN_DEVICES_TAG
 }
 
 # The engine kept in .env, or on the first run --engine, else podman, else Docker. Under the other
@@ -588,6 +658,7 @@ supervise() {
   mkdir -p "$data"
   [ -z "$db" ] || mkdir -p "$db"
   # Its network and name are this machine's, so it sees the ports taken here and EiN's own.
+  supervisor_image
   "$engine" run --rm --name ein-setup --network host --uts host --security-opt label=disable \
     --user "$user" ${gid:+--group-add "$gid"} "${mounts[@]}" \
     -e EIN_SETUP_LOCKED=1 -e EIN_SUPERVISOR_JOB=1 -e EIN_DEPLOY="$here" ${EIN_SOURCE_KEY:+-e EIN_SOURCE_KEY} \
@@ -595,7 +666,19 @@ supervise() {
   [ "$status" != 0 ] || after_reboot
   exit "$status"
 }
-SUPERVISOR_IMAGE=ghcr.io/einhq/supervisor:main
+
+# The supervisor's image, at the version .env pins, and the first time at this folder's release or
+# the newest before it.
+supervisor_image() {
+  local version
+  version=$(sed -n 's/^EIN_SUPERVISOR_VERSION=//p' .env)
+  if [ -z "$version" ]; then
+    version=$(newest_release supervisor) || true
+    [ -n "$version" ] || version=$(deploy_version)
+    set_env EIN_SUPERVISOR_VERSION "$version"
+  fi
+  SUPERVISOR_IMAGE=ghcr.io/einhq/supervisor:$version
+}
 
 # Whether the container engine answers on the socket at this path.
 answers() { [ -S "$1" ] && curl -sf -o /dev/null --max-time 10 --unix-socket "$1" http://d/_ping; }
@@ -641,8 +724,9 @@ supervisor_settings() {
   set_env EIN_DEPLOY "$here"
   grep -q '^SUPERVISOR_KEY=.' .env || set_env SUPERVISOR_KEY "$(secret)"
   grep -q '^EIN_UPDATE_AT=' .env || set_env EIN_UPDATE_AT 04:00
+  supervisor_image
+  "$engine" image inspect "$SUPERVISOR_IMAGE" >/dev/null 2>&1 && return 0
   "$engine" pull "$SUPERVISOR_IMAGE" && return 0
-  "$engine" image inspect "$SUPERVISOR_IMAGE" >/dev/null 2>&1 && echo "It goes on with the supervisor's image it has" && return 0
   echo "The supervisor's image, $SUPERVISOR_IMAGE, could not be pulled"
   return 1
 }
@@ -706,9 +790,10 @@ config_hash() {
   compose --dry-run up -d --no-deps db 2>&1 | grep -o 'io.podman.compose.config-hash=[0-9a-f]*' | head -1 | cut -d= -f2
 }
 running_hash() {
-  local id
-  id=$("$engine" ps -aq --filter label=com.docker.compose.project=ein | head -1)
-  [ -z "$id" ] || "$engine" inspect -f '{{index .Config.Labels "io.podman.compose.config-hash"}}' "$id"
+  local hashes
+  hashes=$("$engine" ps -a --filter label=com.docker.compose.project=ein --format '{{index .Labels "io.podman.compose.config-hash"}}' | sort -u)
+  # Containers made from different configs, as after one service was made again alone.
+  if [ "$(wc -l <<<"$hashes")" -gt 1 ]; then echo mixed; else echo "$hashes"; fi
 }
 
 # The settings, with passwords made here: nothing else keeps them, so this file is the one to back up.
@@ -758,13 +843,12 @@ EIN_GPU=$gpu
 # The Devices module's sidecar, with setup.sh --devices, on this machine's own network: its
 # MQTT broker, on the port the devices on this network reach it on, of EIN_BIND, with the passwords
 # EiN (\`ein\`) and the devices (\`device\`) sign in with; and its restreamer for cameras, with
-# its API and RTSP ports, and the password EiN signs in to it with.
+# its API's port, and the password EiN signs in to it with.
 EIN_DEVICES=0
 MQTT_PORT=1883
 MQTT_EIN_PASSWORD=$(secret)
 MQTT_DEVICE_PASSWORD=$(secret 12)
 STREAMS_PORT=1984
-RTSP_PORT=8554
 STREAMS_PASSWORD=$(secret)
 
 # The supervisor, which installs the media service, the language model and the sidecar when EiN asks,
@@ -883,7 +967,7 @@ devices_secrets() {
     set_env "$name" "$value"
     printf -v "$name" %s "$value"
   done
-  for name in MQTT_PORT=1883 STREAMS_PORT=1984 RTSP_PORT=8554; do
+  for name in MQTT_PORT=1883 STREAMS_PORT=1984; do
     value=${name#*=}
     name=${name%%=*}
     [ -z "${!name:-}" ] || continue
@@ -913,13 +997,15 @@ one_at_a_time() {
   exec flock -o "$here" "$here/setup.sh" "$@"
 }
 
-# This folder, a clone of the source's deploy, moved to its newest commit before anything else, and
-# this script run again with the same options when that changed it: an update takes the compose
-# files and setup.sh as they are now, not as they were installed. The source is
-# --source when given, else the one in .env; the token is EIN_SOURCE_KEY from the environment, else
-# from .env when the source is on .env's host. A folder that is not a git clone is left as it is.
+# This folder, a clone of the source's deploy, brought up to date before anything else, and this
+# script run again with the same options when that changed it: an update takes the compose files and
+# setup.sh as they are now, not as they were installed. From GitHub's einhq it is moved to deploy's
+# newest release (a tag v<x.y.z>) whose supervisor image GitHub has built, when that is this folder's
+# release or newer; from another source, to the newest commit of its main. The source is --source
+# when given, else the one in .env; the token is EIN_SOURCE_KEY from the environment, else from .env
+# when the source is on .env's host. A folder that is not a git clone is left as it is.
 update_self() {
-  local source=$1 installed= before after
+  local source=$1 installed= before after release
   shift
   [ -e .git ] || return 0
   [ ! -f .env ] || installed=$(sed -n 's/^EIN_SOURCE=//p' .env)
@@ -929,12 +1015,34 @@ update_self() {
     EIN_SOURCE_KEY=$(sed -n 's/^EIN_SOURCE_KEY=//p' .env)
   [ -z "$source" ] || git remote set-url origin "$source/deploy.git"
   before=$(git rev-parse HEAD)
-  git_source pull --ff-only --quiet ||
-    fail "$here could not be brought up to date from $(git remote get-url origin): git status there says why"
+  if published "${source:-https://github.com/einhq}"; then
+    git_source fetch --quiet --tags origin ||
+      fail "$here could not fetch deploy's releases from $(git remote get-url origin)"
+    release=$(newest_deploy)
+    if [ -n "$release" ] && version_at_most "$(deploy_version)" "${release#v}"; then
+      git checkout --quiet --detach "$release" ||
+        fail "$here could not be moved to deploy $release: git status there says why"
+    fi
+  else
+    # A folder at a release, from GitHub before, follows main from here on.
+    git symbolic-ref --quiet HEAD >/dev/null || git checkout --quiet main
+    git_source pull --ff-only --quiet ||
+      fail "$here could not be brought up to date from $(git remote get-url origin): git status there says why"
+  fi
   after=$(git rev-parse HEAD)
   [ "$after" != "$before" ] || return 0
-  echo "Updated $here to $(git log -1 --format='%h %cs'); running its setup.sh"
+  echo "Updated $here to $(git describe --tags --exact-match 2>/dev/null || git log -1 --format='%h %cs'); running its setup.sh"
   exec "$here/setup.sh" "$@"
+}
+
+# deploy's newest release here whose supervisor image GitHub's registry has, as its tag; nothing
+# when the registry does not answer.
+newest_deploy() {
+  local built tag
+  built=$(published_versions supervisor) || return 0
+  for tag in $(git tag --list 'v[0-9]*' | grep -E '^v[0-9]+\.[0-9]+\.[0-9]+$' | sort -rV); do
+    ! grep -qxF "${tag#v}" <<<"$built" || { echo "$tag"; return 0; }
+  done
 }
 
 # An organisation's address, https://host/owner, as the source of the sources and the modules. Back
@@ -964,19 +1072,11 @@ is_github() { [[ $(host_of "$1") =~ ^(www\.)?github\.com$ ]]; }
 # whose commits those images do not have.
 built() { ! published "$EIN_SOURCE"; }
 
-# The image a service runs, core, db, ems, devices or supervisor: the one GitHub publishes from the
-# repository of that name (module-devices's sidecar for devices, deploy's supervisor/ for the
-# supervisor), at the line its modules ask for (the media service and the sidecar, EIN_EMS_TAG and
-# EIN_DEVICES_TAG) or :main, or the one built here.
+# The image a service runs, core, db, ems, devices or supervisor: the release GitHub publishes from
+# the repository of that name (module-devices's sidecar for devices, deploy's supervisor/ for the
+# supervisor) that .env pins, or the one built here.
 image_of() {
-  if built; then echo "localhost/ein-$1"; else echo "ghcr.io/einhq/$1:$(tag_of "$1")"; fi
-}
-tag_of() {
-  case $1 in
-    ems) echo "${EIN_EMS_TAG:-main}" ;;
-    devices) echo "${EIN_DEVICES_TAG:-main}" ;;
-    *) echo main ;;
-  esac
+  if built; then echo "localhost/ein-$1"; else echo "ghcr.io/einhq/$1:$(pinned "$1")"; fi
 }
 
 # A Forgejo or a Gitea source is where EiN installs its modules from too, with its token: core's
@@ -1042,7 +1142,7 @@ free_ports() {
   local name port was ours names=(EIN_HTTP_PORT EIN_SSH_PORT)
   if [ "$EIN_DEVICES" = 1 ] &&
     [ -z "$("$engine" ps -q --filter label=com.docker.compose.project=ein --filter label=com.docker.compose.service=devices)" ]; then
-    names+=(MQTT_PORT STREAMS_PORT RTSP_PORT)
+    names+=(MQTT_PORT STREAMS_PORT)
   fi
   [ -z "$ein_network" ] || names+=("${!loopback_ports[@]}")
   ours=$("$engine" ps --filter label=com.docker.compose.project=ein --format '{{.Ports}}')
@@ -1084,9 +1184,8 @@ port_taken() {
 # The devices sidecar is on this machine's own network, listening on its ports itself. EiN with a
 # network of its own reaches it at this machine's loopback as it reaches the others; on the compose
 # network, at this machine's address there: host.containers.internal under podman, the name
-# devices as host-gateway under Docker. The media service, always on the compose network, reads
-# the cameras' streams at the sidecar's RTSP the same way, which EiN tells it
-# (CFG_DEVICES_STREAMS_RTSP).
+# devices as host-gateway under Docker. The media service reads the cameras' streams from EiN,
+# through ems-files, as it reads the files of its requests.
 write_override() {
   local service option lines env devices written=0 reached=() hosts=() forwards=() files_address files_published=
   local devices_host=devices
@@ -1137,15 +1236,13 @@ write_override() {
         devices)
           [ "$EIN_DEVICES" = 1 ] || continue
           lines+=("extends: { file: compose.devices.yaml, service: devices }")
-          lines+=("image: $(image_of devices)")
-          ! built || lines+=("build: { context: src/module-devices/sidecar, dockerfile: Containerfile }")
+          ! built || lines+=("image: $(image_of devices)" "build: { context: src/module-devices/sidecar, dockerfile: Containerfile }")
           ;;
         ems | llm)
           option=EIN_${service^^}
           [ "${!option}" = 1 ] || continue
           lines+=("extends: { file: compose.$service.yaml, service: $service }")
-          [ "$service" = llm ] || lines+=("image: $(image_of ems)")
-          [ "$service" = llm ] || ! built || lines+=("build: { context: src/ems, dockerfile: Containerfile }")
+          [ "$service" = llm ] || ! built || lines+=("image: $(image_of ems)" "build: { context: src/ems, dockerfile: Containerfile }")
           [ "$service" != ems ] || [ "$EIN_DEVICES" != 1 ] || [ "$engine" != docker ] || lines+=("extra_hosts: [\"devices:host-gateway\"]")
           devices=()
           [ "$EIN_GPU" != 1 ] || devices+=(nvidia.com/gpu=all)
@@ -1179,9 +1276,6 @@ write_override() {
           if [ "$EIN_DEVICES" = 1 ] && [ -z "${CFG_DEVICES_STREAMS_URL:-}" ]; then
             env+=("CFG_DEVICES_STREAMS_URL: http://$devices_host:\${STREAMS_PORT:-1984}")
             env+=("CFG_DEVICES_STREAMS_KEY: \${STREAMS_PASSWORD}")
-          fi
-          if [ "$EIN_DEVICES" = 1 ] && [ -z "${CFG_DEVICES_STREAMS_RTSP:-}" ]; then
-            env+=("CFG_DEVICES_STREAMS_RTSP: rtsp://$([ "$engine" = docker ] && echo devices || echo host.containers.internal):\${RTSP_PORT:-8554}")
           fi
           [ -z "$files_address" ] || [ -n "${CFG_EMS_FILES_ADDRESS:-}" ] || env+=("CFG_EMS_FILES_ADDRESS: $files_address")
           if [ "${EIN_SUPERVISOR:-0}" = 1 ]; then
@@ -1257,9 +1351,9 @@ add_modules() {
 # the devices sidecar's and the supervisor's pulled, or the first four built from their sources
 # (built), where there is no supervisor. The model's is neither: compose up pulls it.
 build() {
-  local one=${1:-} service services=()
+  local service services=()
   for service in core db ems devices supervisor; do
-    [ -z "$one" ] || [ "$one" = "$service" ] || continue
+    [ $# = 0 ] || [[ " $* " == *" $service "* ]] || continue
     [ "$service" != ems ] || [ "$EIN_EMS" = 1 ] || continue
     [ "$service" != devices ] || [ "$EIN_DEVICES" = 1 ] || continue
     [ "$service" != supervisor ] || [ "${EIN_SUPERVISOR:-0}" = 1 ] || continue
@@ -1275,14 +1369,7 @@ build() {
     export TMPDIR
   fi
   if ! built; then
-    for service in "${services[@]}"; do
-      case $service in
-        ems | devices) pull_service "$service" || true ;;
-        # Its image may be one GitHub has not published yet: the one here goes on.
-        supervisor) "$engine" pull "$SUPERVISOR_IMAGE" || "$engine" image inspect "$SUPERVISOR_IMAGE" >/dev/null ;;
-        *) "$engine" pull "$(image_of "$service")" ;;
-      esac
-    done
+    for service in "${services[@]}"; do pin_newest "$service"; done
     return
   fi
   local cached=()
@@ -1335,12 +1422,12 @@ podman_compose_build() {
   [ "$failed" = 0 ]
 }
 
-# The ids of the images build tags or pull.
+# The ids of the images build tags or pull, each release's among them.
 built_images() {
   local repo name
   for repo in core db ems devices supervisor; do
-    for name in "localhost/ein-$repo" "ghcr.io/einhq/$repo:main" "ghcr.io/einhq/$repo:$(tag_of "$repo")"; do
-      "$engine" image inspect --format '{{.Id}}' "$name" 2>/dev/null || true
+    for name in "localhost/ein-$repo" "ghcr.io/einhq/$repo"; do
+      "$engine" images -q --no-trunc "$name" 2>/dev/null || true
     done
   done
 }

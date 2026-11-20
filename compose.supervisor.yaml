@@ -7,15 +7,16 @@
 # (EIN_DEPLOY, EIN_DATA, EIN_DB_DIR), so the setup.sh it runs reads and writes them as setup.sh on
 # this machine does. It runs as the user who owns them (EIN_SUPERVISOR_USER), and under Docker with
 # the socket's group (compose.override.yaml); `label=disable` lets it reach the socket under SELinux.
+# Its image is the release of this folder's version.json, EIN_SUPERVISOR_VERSION in .env.
 services:
   supervisor:
-    image: ghcr.io/einhq/supervisor:main
+    image: ghcr.io/einhq/supervisor:${EIN_SUPERVISOR_VERSION:-unpinned}
     restart: unless-stopped
     user: ${EIN_SUPERVISOR_USER:-0:0}
     security_opt: [label=disable]
     environment:
       SUPERVISOR_KEY: ${SUPERVISOR_KEY}
-      SUPERVISOR_IMAGE: ghcr.io/einhq/supervisor:main
+      SUPERVISOR_IMAGE: ghcr.io/einhq/supervisor:${EIN_SUPERVISOR_VERSION:-unpinned}
       EIN_DEPLOY: ${EIN_DEPLOY}
     mem_limit: 256m
     memswap_limit: 256m
