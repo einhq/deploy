@@ -278,7 +278,8 @@ Its restreamer, go2rtc, keeps one connection to each camera EiN has and serves i
 `STREAMS_PORT` (1984), behind the account `ein` and `STREAMS_PASSWORD`: EiN shows it in the browser
 and writes it into the camera's stream nodes, which the media service reads through EiN as it reads
 any file, on this machine or another. EiN gives it the cameras itself; the camera's own password
-stays with EiN and the sidecar. Keep these ports off the internet too.
+stays with EiN and the sidecar. Of go2rtc's API it answers only the paths EiN uses, so the password
+cannot change its config, and it runs as a user of its own. Keep these ports off the internet too.
 
 Under Docker and rootful podman, EiN reaches the sidecar at this machine's address on the compose
 network, so it needs `EIN_BIND` to be `0.0.0.0`; `setup.sh` says so when it is not.

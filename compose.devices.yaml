@@ -10,9 +10,13 @@
 #   Devices module to offer as devices;
 # - a restreamer (go2rtc) for cameras: one connection to each camera, served again to EiN, which
 #   shows it in its pages and writes it into the camera's stream nodes for the media service. Its API
-#   is on STREAMS_PORT of EIN_BIND, behind the account `ein` and STREAMS_PASSWORD.
+#   is on STREAMS_PORT of EIN_BIND, behind the account `ein` and STREAMS_PASSWORD, and answers only
+#   the paths EiN uses; go2rtc runs as a user of its own.
 #
-# It is on the host's network: the listener's multicast never leaves the network it is sent on.
+# It is on the host's network: the listener's multicast never leaves the network it is sent on. Of
+# root's capabilities it keeps the ones its supervisor needs: to give the broker its data (CHOWN,
+# DAC_OVERRIDE, FOWNER), to start the broker and go2rtc as their users (SETUID, SETGID) and to stop
+# them (KILL).
 #
 # The image is the release GitHub publishes from module-devices that .env pins, EIN_DEVICES_VERSION.
 # From any source but GitHub's einhq, compose.override.yaml builds it here instead, as
@@ -22,6 +26,9 @@ services:
     image: ghcr.io/einhq/devices:${EIN_DEVICES_VERSION:-unpinned}
     restart: unless-stopped
     network_mode: host
+    cap_drop: [ALL]
+    cap_add: [CHOWN, DAC_OVERRIDE, FOWNER, SETUID, SETGID, KILL]
+    security_opt: [no-new-privileges]
     mem_limit: 512m
     memswap_limit: 512m
     volumes:
