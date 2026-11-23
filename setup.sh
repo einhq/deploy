@@ -219,10 +219,13 @@ main() {
   mkdir -p "$EIN_DATA"/{files,old,files-volatile,llm,modules}
   prepare_db_dir
   free_ports
-  # A network podman made before it could give names keeps without them: down takes it away with
-  # the containers, and up makes it again.
-  if [ "$engine" = podman ] && [ "$(podman network inspect --format '{{.DNSEnabled}}' ein_default 2>/dev/null)" = false ]; then
+  # A network podman made otherwise than compose.override.yaml says now keeps as it was: it goes
+  # once its containers are down, and up makes it again.
+  local stale network
+  stale=$(stale_networks)
+  if [ -n "$stale" ]; then
     compose down
+    for network in $stale; do ! podman network exists "$network" || podman network rm "$network" >/dev/null; done
   fi
   # On an update, --force-recreate: older podman-compose starts the new images only when the config
   # changed. --remove-orphans: an option left out stops its service. podman-compose's
@@ -784,6 +787,26 @@ has_dnsname() {
 
 compose() { "$engine" compose -p ein "$@"; }
 
+# Whether the compose networks are isolated from one another only when compose.override.yaml says
+# so: under podman's netavark, which otherwise routes between its bridges, so the media service
+# would reach the database by its address. Docker isolates them itself; podman's older CNI has no
+# such option, and there they are not.
+isolates_networks() { [ "$engine" = podman ] && [ "$(podman info --format '{{.Host.NetworkBackend}}')" = netavark ]; }
+
+# The networks podman keeps as they were made, which this compose.override.yaml would make otherwise:
+# one made before podman could give names, or before EiN's networks were isolated from one another.
+stale_networks() {
+  [ "$engine" = podman ] || return 0
+  local network
+  for network in ein_default ein_db; do
+    podman network exists "$network" || continue
+    if [ "$(podman network inspect --format '{{.DNSEnabled}}' "$network")" = false ] ||
+      { isolates_networks && [ "$(podman network inspect --format '{{index .Options "isolate"}}' "$network")" != true ]; }; then
+      echo "$network"
+    fi
+  done
+}
+
 # The config hash podman-compose labels the containers it makes with, for the compose files as they
 # are now, from a dry run; and the one the running containers were made from.
 config_hash() {
@@ -819,9 +842,10 @@ write_env() {
   if nvidia-smi >/dev/null 2>&1 && { [ -s /var/run/cdi/nvidia.yaml ] || compgen -G '/etc/cdi/nvidia*.yaml' >/dev/null; }; then gpu=1; fi
   cat >.env <<EOF
 # EiN's settings, written by setup.sh on $(date +%F). Keep this file: the passwords below are in it
-# and nowhere else. compose reads it, and EiN and the media service get it as their environment, so
-# a CFG_ line for EiN or an EMS_ line for the media service goes here too. Apply a change with
-# ./setup.sh, or \`$engine compose up -d\` when no option changed.$(swap_note)
+# and nowhere else. compose reads it, EiN gets it as its environment, and the media service its
+# EMS_ lines and TZ alone, so a CFG_ line for EiN or an EMS_ line for the media service goes here
+# too. Apply a change with ./setup.sh, or \`$engine compose up -d\` when no option changed and no
+# EMS_ line was added.$(swap_note)
 
 # The compose project's name, which names its containers, network and volumes.
 COMPOSE_PROJECT_NAME=ein
@@ -1187,7 +1211,7 @@ port_taken() {
 # devices as host-gateway under Docker. The media service reads the cameras' streams from EiN,
 # through ems-files, as it reads the files of its requests.
 write_override() {
-  local service option lines env devices written=0 reached=() hosts=() forwards=() files_address files_published=
+  local service option lines env devices name written=0 reached=() hosts=() forwards=() files_address files_published=
   local devices_host=devices
   local -A port_in=([db]=5432 [ems]=8181 [llm]=8190 [supervisor]=8199)
   # The media service reaches the files of its requests at EiN's ems-files port: by EiN's name on
@@ -1249,9 +1273,21 @@ write_override() {
           # The media service mounts the files of a request with sshfs (ems-files).
           [ "$service" != ems ] || devices+=(/dev/fuse)
           [ ${#devices[@]} = 0 ] || lines+=("devices: [$(IFS=,; echo "${devices[*]}")]")
+          # Of .env, the media service gets its EMS_ lines and TZ, none of the passwords. EMS_KEY and
+          # EMS_PORT are compose.ems.yaml's, and EMS_MEMORY its memory limit.
+          if [ "$service" = ems ]; then
+            env=()
+            for name in $(sed -n 's/^\(EMS_[A-Za-z0-9_]*\|TZ\)=.*/\1/p' .env | sort -u); do
+              case $name in EMS_KEY | EMS_PORT | EMS_MEMORY) ;; *) env+=("$name: \${$name}") ;; esac
+            done
+            [ ${#env[@]} = 0 ] || lines+=("environment:" "${env[@]/#/  }")
+          fi
           ;;
         core)
           ! built || lines+=("image: $(image_of core)" "build: { context: src/core, dockerfile: src/Containerfile }")
+          # EiN on the compose network joins the database's too; on a network of its own it reaches
+          # the database at its loopback port.
+          [ -n "$ein_network" ] || lines+=("networks: [default, db]")
           env=()
           [ "$EIN_LLM" != 1 ] || env+=("CFG_LLM_CARD: $([ "$EIN_GPU" = 1 ] && echo card || echo cpu)")
           if [ -n "$ein_network" ]; then
@@ -1310,6 +1346,11 @@ write_override() {
     done
     # Never an empty services: docker-compose 1.x takes such a file for its old version 1 format.
     [ "$written" = 1 ] || echo "  core: {}"
+    if isolates_networks; then
+      echo "networks:"
+      echo "  default: { driver_opts: { isolate: \"true\" } }"
+      echo "  db: { driver_opts: { isolate: \"true\" } }"
+    fi
   } >compose.override.yaml
 }
 

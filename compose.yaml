@@ -11,6 +11,11 @@
 #
 # EiN reads .env as its environment, so a CFG_ line added there reaches it at the next `up -d`.
 #
+# The database is on a network of its own, db, which EiN joins beside the compose network (setup.sh
+# names both for it in compose.override.yaml, as EiN may have a network of its own instead): the
+# media service, which reads files anyone may send, and the other services do not reach it. Under
+# podman, compose.override.yaml isolates the two networks from each other, as Docker does already.
+#
 # The project's name, ein, is COMPOSE_PROJECT_NAME in .env: docker-compose 1.x rejects a top-level
 # name in this file.
 
@@ -21,6 +26,7 @@ services:
   db:
     image: ghcr.io/einhq/db:${EIN_DB_VERSION:-unpinned}
     restart: unless-stopped
+    networks: [db]
     environment:
       POSTGRES_USER: ein
       POSTGRES_DB: ein
@@ -86,6 +92,10 @@ services:
     depends_on:
       db:
         condition: service_healthy
+
+networks:
+  default: {}
+  db: {}
 
 volumes:
   db:

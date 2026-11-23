@@ -136,7 +136,8 @@ podman compose down             # stop; `up -d` starts again
 Port 8080 is the web interface and 2222 SSH and SFTP, on every address of the machine; when
 something else on the machine has one, `setup.sh` takes the next free port and says so. Set
 `EIN_BIND=127.0.0.1` in `.env` to keep them to the machine behind an HTTPS proxy of your own. The
-database, the media service and the model are reached only by EiN, on the compose network.
+database, the media service and the model are reached only by EiN, on the compose network; the
+database is on a network of its own beside it, which EiN alone joins, isolated from the other.
 
 A program on another machine that uses the media service, such as a scanning station, reaches it
 when `.env` sets `EIN_EMS_BIND` to this machine's address on your network (or `0.0.0.0`): the media
@@ -247,7 +248,10 @@ file.
 The media service mounts none of EiN's folders: it reaches the files of each request through EiN's
 `ems-files` service, at `CFG_EMS_FILES_ADDRESS`, with an sshfs mount, for which its container has
 `/dev/fuse`, the `SYS_ADMIN` capability and no AppArmor profile, since Docker's default one denies
-the mount. `./setup.sh` writes the address: EiN's name on the
+the mount. It parses whatever file it is sent, so it has nothing more: it runs as a user of its own
+with no capability of its own, which only the setuid `fusermount3` and Chromium's sandbox take up
+(`compose.ems.yaml` names them all), does not reach the database, and of `.env` gets its `EMS_`
+lines and `TZ` alone, which `./setup.sh` names to it. `./setup.sh` writes the address: EiN's name on the
 compose network, or, when EiN has a network of its own under rootless podman, this machine's address
 (`host.containers.internal`), where it publishes `CFG_EMS_FILES_PORT` (2224) on `EIN_BIND`. A media
 service on another machine is `CFG_EMS_FILES_ADDRESS` in `.env`, the `host:port` it reaches this
