@@ -197,13 +197,21 @@ and organisations is enough. The installer takes both and fetches deploy from th
 
 ```bash
 K=…   # the token
-curl -fsSL -H "Authorization: token $K" 'http://forge.example:3000/api/v1/repos/ein/einhq.github.io/raw/install.sh?ref=main' \
-  | EIN_SOURCE_KEY=$K bash -s -- --source http://forge.example:3000/ein --ems --module archive
+curl -fsSL -H "Authorization: token $K" 'https://forge.example:3000/api/v1/repos/ein/einhq.github.io/raw/install.sh?ref=main' \
+  | EIN_SOURCE_KEY=$K bash -s -- --source https://forge.example:3000/ein --ems --module archive
 ```
+
+The source is fetched over https. Over plain http anyone on the network between could read the
+token and send code of their own, which setup.sh would run and build, so an `http://` source is
+refused unless it is on this machine (`localhost`, `127.0.0.1`) or `--insecure-source` says the
+network is yours alone. `.env` keeps that as `EIN_SOURCE_INSECURE=1` for the source's host, and
+setup.sh names the host to EiN in `CFG_MODULE_SOURCES_INSECURE`, so the modules may come over http
+from there too.
 
 `.env` keeps them as `EIN_SOURCE` and `EIN_SOURCE_KEY`, so every update fetches from the same place;
 `--source` again moves an installation to another. A source on another host, such as GitHub again,
-drops the token, unless `EIN_SOURCE_KEY` gives a new one with it. git gets the token as a header for
+drops the token, unless `EIN_SOURCE_KEY` gives a new one with it, and `--insecure-source`, unless
+given again. git gets the token as a header for
 each call, so it is in no `.git/config`. From any source but GitHub's `einhq`, the images of EiN,
 the database, the media service and the devices sidecar are built here from the sources of core,
 db, ems and module-devices, as `localhost/ein-core`, `localhost/ein-db`, `localhost/ein-ems` and

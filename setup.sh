@@ -15,6 +15,7 @@
 #   ./setup.sh --no-supervisor    leave the supervisor out, which installs and updates the services
 #                                 when EiN asks; --supervisor adds it again
 #   ./setup.sh --source URL       fetch the sources and the modules from this organisation instead
+#   ./setup.sh --insecure-source  let --source be plain http:// on another machine (see below)
 #   ./setup.sh --db-dir DIR       keep the database in this folder instead of db under the data folder
 #   ./setup.sh --http-port N      the web interface's port (default: 8080, or the next free one)
 #   ./setup.sh --ssh-port N       SSH and SFTP's port (default: 2222, or the next free one)
@@ -38,12 +39,19 @@
 # removes the images it replaced, and says how much that freed.
 #
 # --source names an organisation on GitHub, Forgejo or Gitea that has EiN's repositories under their
-# own names (default: https://github.com/einhq), such as http://forge.example:3000/ein. When it is a
+# own names (default: https://github.com/einhq), such as https://forge.example:3000/ein. When it is a
 # Forgejo or a Gitea, EiN installs its modules from there too. The images of EiN, its database and
 # the media service are pulled from GitHub's registry only from https://github.com/einhq, which
 # publishes them, and built here from any other source's core, db and ems. EIN_SOURCE_KEY in the
 # environment is the token that reads the source, when its repositories are private; it is kept in
 # .env with the source, and a --source on another host without a token of its own drops it.
+#
+# A source is fetched over https. Over plain http anyone on the network between could read its
+# token and answer with code of their own, which this script would run and build: an http:// source
+# is refused but on this machine (localhost, 127.0.0.1), unless --insecure-source says the network
+# is trusted. That is kept in .env (EIN_SOURCE_INSECURE) for the source, and EiN is told it may
+# reach that host over http for its modules too (CFG_MODULE_SOURCES_INSECURE); a --source on
+# another host drops it, unless --insecure-source comes with it again.
 #
 # From GitHub's einhq every service runs a release, an image GitHub builds once for it and never
 # again, at the version .env pins: EIN_CORE_VERSION, EIN_DB_VERSION, EIN_EMS_VERSION,
@@ -73,7 +81,7 @@ here=$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)
 cd "$here"
 
 main() {
-  local args=("$@") want_ems= want_llm= want_devices= modules=() source= db_dir= only= key=${EIN_SOURCE_KEY:-} options=0 unknown=
+  local args=("$@") want_ems= want_llm= want_devices= modules=() source= insecure= db_dir= only= key=${EIN_SOURCE_KEY:-} options=0 unknown=
   local http_port= ssh_port= bind= want_supervisor= updating=
   data_dir= want_engine=
   while [ $# -gt 0 ]; do
@@ -95,9 +103,10 @@ main() {
         [ $# -ge 2 ] || fail "--source needs an organisation's address, such as https://github.com/einhq"
         source=${2%/}
         [[ $source =~ ^https?://[A-Za-z0-9.-]+(:[0-9]+)?/[A-Za-z0-9._-]+$ ]] ||
-          fail "--source takes an organisation's address, such as https://github.com/einhq or http://forge.example:3000/ein: $2"
+          fail "--source takes an organisation's address, such as https://github.com/einhq or https://forge.example:3000/ein: $2"
         shift
         ;;
+      --insecure-source) insecure=1 ;;
       --db-dir)
         [ $# -ge 2 ] || fail "--db-dir needs a folder"
         db_dir=$2
@@ -142,6 +151,7 @@ main() {
   done
 
   one_at_a_time "${args[@]}"
+  check_source "$source" "$insecure"
   update_self "$source" "${args[@]}"
   [ -z "$unknown" ] || fail "unknown option $unknown (--help lists them)"
   pick_engine
@@ -192,6 +202,7 @@ main() {
   [ -z "$want_devices" ] || set_env EIN_DEVICES "$want_devices"
   [ ${#modules[@]} = 0 ] || add_modules "${modules[@]}"
   [ -z "$source" ] || set_source "$source"
+  [ -z "$insecure" ] || set_env EIN_SOURCE_INSECURE 1
   [ -z "$key" ] || set_env EIN_SOURCE_KEY "$key"
   [ -z "$db_dir" ] || set_db_dir "$db_dir"
   load_env
@@ -216,7 +227,7 @@ main() {
   build ${updating:-}
 
   step "Starting EiN"
-  mkdir -p "$EIN_DATA"/{files,old,files-volatile,llm,modules}
+  data_folders
   prepare_db_dir
   free_ports
   # A network podman made otherwise than compose.override.yaml says now keeps as it was: it goes
@@ -915,7 +926,9 @@ EIN_SSH_PORT=2222
 
 # Where the sources come from: an organisation with EiN's repositories under their own names, and
 # the token that reads them when they are private. setup.sh --source sets both; a Forgejo or a Gitea
-# is where EiN finds its modules too (CFG_MODULE_SOURCES below, which setup.sh keeps in step).
+# is where EiN finds its modules too (CFG_MODULE_SOURCES below, which setup.sh keeps in step). Over
+# https: plain http, which anyone on the network between can read and change, needs
+# --insecure-source, which sets EIN_SOURCE_INSECURE=1.
 EIN_SOURCE=https://github.com/einhq
 EIN_SOURCE_KEY=
 
@@ -975,14 +988,59 @@ load_env() {
   set -a && . ./.env && set +a
   : "${EIN_DEVICES:=0}"
   [ -n "${EIN_HOSTNAME:-}" ] || { EIN_HOSTNAME=$(machine_name); set_env EIN_HOSTNAME "$EIN_HOSTNAME"; export EIN_HOSTNAME; }
+  [ -n "${EIN_USER:-}" ] || pick_user
+}
+
+# The folders in the data folder that EiN and the sidecar write, which belong to EIN_USER.
+OWNED_FOLDERS=(files files-volatile modules mqtt)
+
+# The user EiN and the sidecar run as, with no capabilities, EIN_USER in .env: root in the container
+# where the engine is this user's (rootless podman or Docker, whose root in a container is this
+# user), else this user, and when root runs setup.sh, the images' own user, ein (65532). It owns the
+# folders they write. It is chosen once, by the first run without EIN_USER, which gives it what was
+# written there as another user, such as by an EiN that ran as root, in a container of the
+# database's image when the image is here (ein/core#1385).
+pick_user() {
+  local user folder
+  if rootless; then user=0:0; elif [ "$(id -u)" != 0 ]; then user=$(id -u):$(id -g); else user=65532:65532; fi
+  if "$engine" image inspect "$(image_of db)" >/dev/null 2>&1; then
+    for folder in "${OWNED_FOLDERS[@]}"; do
+      [ -d "$EIN_DATA/$folder" ] || continue
+      db_sh "$EIN_DATA/$folder" z "find /d \\( ! -user ${user%:*} -o ! -group ${user#*:} \\) -exec chown -h $user {} +" ||
+        fail "what is in $EIN_DATA/$folder could not all be given to the user EiN runs as, $user (in the container)"
+    done
+  fi
+  set_env EIN_USER "$user"
+  export EIN_USER=$user
+}
+
+# Whether the engine runs as this user rather than as root: rootless podman, or Docker in rootless
+# mode.
+rootless() {
+  if [ "$engine" = podman ]; then
+    [ "$(podman info --format '{{.Host.Security.Rootless}}')" = true ]
+  else
+    [[ $(docker info --format '{{.SecurityOptions}}') == *rootless* ]]
+  fi
+}
+
+# The data folder, its owner's alone, with every folder in it: those EiN and the sidecar write are
+# EIN_USER's, which they are already but where root runs setup.sh.
+data_folders() {
+  local folder
+  mkdir -p "$EIN_DATA"/{files,old,files-volatile,llm,modules}
+  [ "$EIN_DEVICES" != 1 ] || mkdir -p "$EIN_DATA/mqtt"
+  chmod 700 "$EIN_DATA"
+  [ "$(id -u)" = 0 ] && [ "$EIN_USER" != 0:0 ] || return 0
+  for folder in "${OWNED_FOLDERS[@]}"; do [ ! -d "$EIN_DATA/$folder" ] || chown "$EIN_USER" "$EIN_DATA/$folder"; done
 }
 
 # This machine's name without its domain.
 machine_name() { local name; name=$(uname -n); echo "${name%%.*}"; }
 
 # The sidecar's passwords and ports, kept in .env, made the first time where an older .env lacks
-# them. The sidecar hashes the broker's passwords itself, into its data folder EIN_DATA/mqtt, which
-# keeps the broker's retained messages too.
+# them, and its data folder EIN_DATA/mqtt. The sidecar hashes the broker's passwords itself, into
+# that folder, which keeps the broker's retained messages too.
 devices_secrets() {
   local name value
   for name in MQTT_EIN_PASSWORD MQTT_DEVICE_PASSWORD STREAMS_PASSWORD; do
@@ -998,7 +1056,7 @@ devices_secrets() {
     set_env "$name" "$value"
     printf -v "$name" %s "$value"
   done
-  mkdir -p "$EIN_DATA/mqtt"
+  data_folders
 }
 
 # The sidecar is on this machine's own network, and EiN on the compose network reaches it at this
@@ -1071,18 +1129,42 @@ newest_deploy() {
 
 # An organisation's address, https://host/owner, as the source of the sources and the modules. Back
 # on GitHub, the module settings a Forgejo or a Gitea source wrote go again, and EiN's default holds.
-# On another host the token goes too, which that host would refuse: main sets the one given with
-# --source after this.
+# On another host the token goes too, which that host would refuse, and the leave to use plain http:
+# main sets the ones given with --source after this.
 set_source() {
   local url=$1 installed
   installed=$(sed -n 's/^EIN_SOURCE=//p' .env)
   if is_github "$url" && ! is_github "$installed"; then
     unset_env CFG_MODULE_SOURCES
     unset_env CFG_MODULE_SOURCES_KEY
+    unset_env CFG_MODULE_SOURCES_INSECURE
   fi
-  [ "$(host_of "$url")" = "$(host_of "$installed")" ] || set_env EIN_SOURCE_KEY ""
+  if [ "$(host_of "$url")" != "$(host_of "$installed")" ]; then
+    set_env EIN_SOURCE_KEY ""
+    unset_env EIN_SOURCE_INSECURE
+  fi
   set_env EIN_SOURCE "$url"
 }
+
+# The source this run fetches from, --source or the one in .env, refused when it is plain http on
+# another machine without --insecure-source, given now or kept in .env for that host. It runs before
+# anything is fetched: this folder's update is the first fetch, and it runs what it fetched.
+check_source() {
+  local source=$1 insecure=$2 installed=
+  if [ -f .env ]; then
+    installed=$(sed -n 's/^EIN_SOURCE=//p' .env)
+    if [ -z "$insecure" ] && { [ -z "$source" ] || [ "$(host_of "$source")" = "$(host_of "$installed")" ]; }; then
+      insecure=$(sed -n 's/^EIN_SOURCE_INSECURE=//p' .env)
+    fi
+  fi
+  source=${source:-$installed}
+  [[ $source == http://* ]] || return 0
+  ! loopback "$source" || return 0
+  [ "$insecure" != 1 ] || return 0
+  fail "the source $source is plain http, over which anyone on the network between could read its token and send code of their own for this machine to run: give its https address with --source, or add --insecure-source if the network is yours alone"
+}
+
+loopback() { [[ $(host_of "$1") =~ ^(localhost|127(\.[0-9]+){3})(:[0-9]+)?$ ]]; }
 
 host_of() {
   local host=${1#*://}
@@ -1104,12 +1186,21 @@ image_of() {
 }
 
 # A Forgejo or a Gitea source is where EiN installs its modules from too, with its token: core's
-# CFG_MODULE_SOURCES and CFG_MODULE_SOURCES_KEY (host[:port]=token), kept in step with the source.
+# CFG_MODULE_SOURCES and CFG_MODULE_SOURCES_KEY (host[:port]=token, http://host[:port]=token over
+# plain http), kept in step with the source, and CFG_MODULE_SOURCES_INSECURE naming its host when it
+# is plain http, which EiN otherwise refuses.
 module_sources() {
   ! is_github "$EIN_SOURCE" || return 0
+  local origin=
+  [[ $EIN_SOURCE != http://* ]] || origin=http://
   set_env CFG_MODULE_SOURCES "$EIN_SOURCE"
+  if [ -n "$origin" ]; then
+    set_env CFG_MODULE_SOURCES_INSECURE "$(host_of "$EIN_SOURCE")"
+  else
+    unset_env CFG_MODULE_SOURCES_INSECURE
+  fi
   if [ -n "$EIN_SOURCE_KEY" ]; then
-    set_env CFG_MODULE_SOURCES_KEY "$(host_of "$EIN_SOURCE")=$EIN_SOURCE_KEY"
+    set_env CFG_MODULE_SOURCES_KEY "$origin$(host_of "$EIN_SOURCE")=$EIN_SOURCE_KEY"
   else
     unset_env CFG_MODULE_SOURCES_KEY
   fi

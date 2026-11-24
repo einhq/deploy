@@ -55,6 +55,8 @@ services:
   # originals, /old older originals, /files-volatile the renditions. `z` labels them shared
   # under SELinux and is ignored elsewhere. The media service reaches the files
   # of its requests at the ems-files port, CFG_EMS_FILES_ADDRESS, which setup.sh writes.
+  #
+  # It runs as EIN_USER, who owns the data folder (setup.sh), with no capabilities.
   core:
     # Core's image with its web interface built in, the release GitHub publishes from ein/core that
     # .env pins, EIN_CORE_VERSION. From any source but GitHub's einhq, compose.override.yaml builds
@@ -64,6 +66,9 @@ services:
     hostname: ${EIN_HOSTNAME:-ein}
     restart: unless-stopped
     stop_grace_period: 60s
+    user: ${EIN_USER:?run setup.sh, which writes .env}
+    cap_drop: [ALL]
+    security_opt: [no-new-privileges]
     env_file: .env
     environment:
       POSTGRES_URL: postgres://ein:${POSTGRES_PASSWORD}@db:5432/ein
