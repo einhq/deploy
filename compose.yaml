@@ -74,7 +74,7 @@ services:
       POSTGRES_URL: postgres://ein:${POSTGRES_PASSWORD}@db:5432/ein
       CFG_HTTP_PORT: 8080
       CFG_SSH_PORT: 2222
-      CFG_EMS_URL: http://ems:8181
+      CFG_EMS_URL: ${CFG_EMS_URL:-http://ems:8181}
       CFG_EMS_KEY: ${EMS_KEY:?run setup.sh, which writes .env}
       CFG_LLM_URL: ${CFG_LLM_URL:-http://llm:8190}
       MODULE_INSTALL_PATH: /modules-installed

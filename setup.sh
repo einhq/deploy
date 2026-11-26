@@ -21,6 +21,11 @@
 #   ./setup.sh --ssh-port N       SSH and SFTP's port (default: 2222, or the next free one)
 #   ./setup.sh --bind ADDRESS     the address they listen on: 0.0.0.0, every one (default), or
 #                                 127.0.0.1, this machine alone, behind an HTTPS proxy of your own
+#   ./setup.sh --backup DIR       back up EiN into a new folder in DIR: the database, the files, the
+#                                 renditions, the modules and .env; --keep N removes all but the newest N
+#   ./setup.sh --restore DIR      put a backup back, the newest in DIR or the one DIR is, and start EiN on it:
+#                                 here, replacing what this installation holds, or on a new machine
+#                                 (with --data, --db-dir and --engine, as at an install)
 #
 # The first run only, when it writes .env:
 #   --data DIR                    the folder for your originals, the renditions, scratch space, the
@@ -82,7 +87,7 @@ cd "$here"
 
 main() {
   local args=("$@") want_ems= want_llm= want_devices= modules=() source= insecure= db_dir= only= key=${EIN_SOURCE_KEY:-} options=0 unknown=
-  local http_port= ssh_port= bind= want_supervisor= updating=
+  local http_port= ssh_port= bind= want_supervisor= updating= backup_dir= restore_dir= keep=
   data_dir= want_engine=
   while [ $# -gt 0 ]; do
     case $1 in
@@ -133,6 +138,16 @@ main() {
         want_engine=$2
         shift
         ;;
+      --backup | --restore)
+        [ $# -ge 2 ] || fail "$1 needs a folder"
+        if [ "$1" = --backup ]; then backup_dir=$2; else restore_dir=$2; fi
+        shift
+        ;;
+      --keep)
+        [ $# -ge 2 ] && [[ $2 =~ ^[1-9][0-9]*$ ]] || fail "--keep takes how many backups to keep, 1 or more"
+        keep=$2
+        shift
+        ;;
       --only)
         [ $# -ge 2 ] || fail "--only needs a service: core, ems, db, llm, devices or supervisor"
         only=$2
@@ -151,6 +166,22 @@ main() {
   done
 
   one_at_a_time "${args[@]}"
+  # A backup and a restore are of the installation as it is: this folder is not updated first.
+  if [ -n "$backup_dir$restore_dir" ]; then
+    [ -z "$unknown" ] || fail "unknown option $unknown (--help lists them)"
+    [ -z "$backup_dir" ] || [ -z "$restore_dir" ] || fail "--backup and --restore go one at a time"
+  fi
+  if [ -n "$backup_dir" ]; then
+    [ "$options" = "$((${keep:+1} + 1))" ] || fail "--backup takes --keep beside it, and no other option"
+    backup "$backup_dir" "$keep"
+    return
+  fi
+  [ -z "$keep" ] || fail "--keep goes with --backup"
+  if [ -n "$restore_dir" ]; then
+    [ "$options" = "$((${data_dir:+1} + ${db_dir:+1} + ${want_engine:+1} + 1))" ] ||
+      fail "--restore takes --data, --db-dir and --engine beside it, and no other option"
+    restore "$restore_dir" "$db_dir"
+  fi
   check_source "$source" "$insecure"
   update_self "$source" "${args[@]}"
   [ -z "$unknown" ] || fail "unknown option $unknown (--help lists them)"
@@ -161,6 +192,7 @@ main() {
     [ "$options" = 0 ] || fail "--only updates what is installed: give the other options without it"
     [ -f .env ] || fail "--only updates an installation: run ./setup.sh first"
     load_env
+    ! restoring || fail "a restore is not finished here: ./setup.sh finishes it"
     # podman-compose 1.0 hashes the whole project's config: after a change to any compose file, or
     # to a version .env pins, starting one service makes every container again, with that one's
     # swap limit, which the database's start refuses. So the services named are pinned first, and
@@ -241,13 +273,25 @@ main() {
   # On an update, --force-recreate: older podman-compose starts the new images only when the config
   # changed. --remove-orphans: an option left out stops its service. podman-compose's
   # --force-recreate takes every service down first anyway, so there they are taken down and started
-  # one by one (start).
+  # one by one (start). A restore loads the database before EiN starts on it (restore_db).
   if [ "$compose_tool" = podman-compose ]; then
     compose down --remove-orphans
-    start db devices core ems llm supervisor
+    if restoring; then
+      start db
+      restore_db
+      start devices core ems llm supervisor
+    else
+      start db devices core ems llm supervisor
+    fi
   else
-    local recreate=()
+    local recreate=() id
     [ -z "$("$engine" ps -aq --filter label=com.docker.compose.project=ein)" ] || recreate=(--force-recreate)
+    if restoring; then
+      id=$(service_container core)
+      [ -z "$id" ] || "$engine" stop -t 60 "$id" >/dev/null
+      compose up -d db
+      restore_db
+    fi
     compose up -d "${recreate[@]}" --remove-orphans
   fi
   check_db_mount
@@ -445,6 +489,8 @@ modules_need() {
   for service in ems devices llm; do
     option=EIN_${service^^}
     [ "${!option:-0}" != 1 ] || continue
+    # A media service elsewhere, which .env names.
+    [ "$service" != ems ] || [ -z "${CFG_EMS_URL:-}" ] || continue
     for module in $(modules_asking "$service"); do
       echo "The $module module talks to ${what[$service]}, which is not installed here: $([ "${EIN_SUPERVISOR:-0}" != 1 ] || echo "Settings → Modules in EiN installs it, or ")./setup.sh --$service adds it."
     done
@@ -581,7 +627,12 @@ pin_newest() {
     pin "$1" "$newest"
   fi
   [ -n "$(pinned "$1")" ] || fail "no release of $1 could be had from GitHub's registry"
-  # A release is never built again, so the image here is it.
+  pull_pinned "$1"
+}
+
+# A service's image at the version .env pins, pulled when it is not here. A release is never built
+# again, so the image here is it.
+pull_pinned() {
   "$engine" image inspect "$(image_of "$1")" >/dev/null 2>&1 || "$engine" pull "$(image_of "$1")" ||
     fail "$(image_of "$1") could not be pulled"
 }
@@ -843,17 +894,10 @@ write_env() {
     [[ $password != *[\'\\]* && $password != *$'\n'* ]] ||
       fail "INITIAL_ADMIN_PASSWORD holds a ' or a \\, which .env cannot keep as they are: choose one without"
   fi
-  # A database from an earlier install has the password of that install's .env, which a new one
-  # does not know: EiN would not get in.
-  ! "$engine" volume inspect ein_db >/dev/null 2>&1 ||
-    fail "the database of an earlier install is here, the volume ein_db, and its password was in the .env that is gone. Put that .env back, or remove the database for a new one: $engine volume rm ein_db"
   mkdir -p "$data"
   data=$(cd "$data" && pwd)
-  # The database's folder belongs to its postgres user, which this user cannot read under rootless
-  # podman or Docker: one that cannot be read holds an earlier install's database.
-  [ ! -d "$data/db" ] || { [ -r "$data/db" ] && [ -z "$(ls -A "$data/db")" ]; } ||
-    fail "the database of an earlier install is here, in $data/db, and its password was in the .env that is gone. Put that .env back, or remove the database for a new one: $(remove_dir_command) $data/db"
-  if nvidia-smi >/dev/null 2>&1 && { [ -s /var/run/cdi/nvidia.yaml ] || compgen -G '/etc/cdi/nvidia*.yaml' >/dev/null; }; then gpu=1; fi
+  no_earlier_db "$data/db"
+  ! gpu_here || gpu=1
   cat >.env <<EOF
 # EiN's settings, written by setup.sh on $(date +%F). Keep this file: the passwords below are in it
 # and nowhere else. compose reads it, EiN gets it as its environment, and the media service its
@@ -905,6 +949,7 @@ EIN_MODULES=""
 EIN_DATA=$data
 POSTGRES_PASSWORD=$(secret)
 EMS_KEY=$(secret)
+LLM_KEY=$(secret)
 TZ=$(timedatectl show -p Timezone --value 2>/dev/null || cat /etc/timezone 2>/dev/null || echo UTC)
 
 $(admin_password "$password")
@@ -920,6 +965,12 @@ EIN_SSH_PORT=2222
 # its own in ems.keys beside this file, a line \`<key> <name> [<weight>]\` (the weight is its share
 # when callers wait). It answers plain HTTP: only on a network you trust.
 # EIN_EMS_BIND=127.0.0.1
+
+# A media service on another machine instead of --ems: its address, with EMS_KEY above the key of
+# this EiN in its ems.keys, and the host:port it reaches this machine's ems-files at, which setup.sh
+# publishes on EIN_BIND.
+# CFG_EMS_URL=http://media.example:18181
+# CFG_EMS_FILES_ADDRESS=ein.example:2224
 
 # A hosted language model instead of --llm: its address (without /v1), key, name and model.
 # CFG_LLM_URL=https://api.openai.com
@@ -943,6 +994,21 @@ EOF
   chmod 600 .env
   echo "Wrote .env: your files go under $data"
 }
+
+# No database of an earlier install where a new .env's goes, in the volume ein_db or in the folder
+# named: it has the password of that install's .env, which the new one does not know, and EiN would
+# not get in. The folder belongs to the database's postgres user, which this user cannot read under
+# rootless podman or Docker: one that cannot be read holds a database.
+no_earlier_db() {
+  ! "$engine" volume inspect ein_db >/dev/null 2>&1 ||
+    fail "the database of an earlier install is here, the volume ein_db, and its password was in the .env that is gone. Put that .env back, or remove the database for a new one: $engine volume rm ein_db"
+  [ ! -d "$1" ] || { [ -r "$1" ] && [ -z "$(ls -A "$1")" ]; } ||
+    fail "the database of an earlier install is here, in $1, and its password was in the .env that is gone. Put that .env back, or remove the database for a new one: $(remove_dir_command) $1"
+}
+
+# Whether this machine has an NVIDIA card with its CDI spec, which the media service and the model
+# are given (EIN_GPU).
+gpu_here() { nvidia-smi >/dev/null 2>&1 && { [ -s /var/run/cdi/nvidia.yaml ] || compgen -G '/etc/cdi/nvidia*.yaml' >/dev/null; }; }
 
 # The command that removes a folder the database's postgres user owns: under rootless podman it
 # belongs to one of this user's subordinate ids, under Docker to root's.
@@ -985,8 +1051,9 @@ set_env() {
 unset_env() { sed -i "/^$1=/d" .env; }
 
 # .env as this script's variables, with the options an older .env does not name; this machine's
-# name is written into it.
+# name and the language model's key are written into it.
 load_env() {
+  grep -q '^LLM_KEY=.' .env || set_env LLM_KEY "$(secret)"
   # shellcheck disable=SC1091
   set -a && . ./.env && set +a
   : "${EIN_DEVICES:=0}"
@@ -1384,6 +1451,8 @@ write_override() {
           [ -n "$ein_network" ] || lines+=("networks: [default, db]")
           env=()
           [ "$EIN_LLM" != 1 ] || env+=("CFG_LLM_CARD: $([ "$EIN_GPU" = 1 ] && echo card || echo cpu)")
+          # The model's key, unless .env names a hosted model, whose key is its own CFG_LLM_KEY there.
+          [ "$EIN_LLM" != 1 ] || [ -n "${CFG_LLM_URL:-}" ] || env+=("CFG_LLM_KEY: \${LLM_KEY}")
           if [ -n "$ein_network" ]; then
             if [ "$ein_network" = pasta ]; then
               lines+=("network_mode: \"pasta:$(IFS=,; echo "${forwards[*]}")\"")
@@ -1393,7 +1462,7 @@ write_override() {
               env+=("TRUSTED_PROXIES: \"10.0.2.2,\${TRUSTED_PROXIES:-}\"")
             fi
             env+=("POSTGRES_URL: postgres://ein:\${POSTGRES_PASSWORD}@db:$(loopback_port db)/ein")
-            [ "$EIN_EMS" != 1 ] || env+=("CFG_EMS_URL: http://ems:$(loopback_port ems)")
+            [ "$EIN_EMS" != 1 ] || [ -n "${CFG_EMS_URL:-}" ] || env+=("CFG_EMS_URL: http://ems:$(loopback_port ems)")
             [ "$EIN_LLM" != 1 ] || [ -n "${CFG_LLM_URL:-}" ] || env+=("CFG_LLM_URL: http://llm:$(loopback_port llm)")
           fi
           [ ${#hosts[@]} = 0 ] || lines+=("extra_hosts: [$(IFS=,; echo "${hosts[*]}")]")
@@ -1503,8 +1572,12 @@ build() {
     mkdir -p "$TMPDIR"
     export TMPDIR
   fi
+  # A restore keeps the database at the release the backup pins: its dump loads only into the
+  # TimescaleDB version it was made with (restore_db), and the next run updates it.
   if ! built; then
-    for service in "${services[@]}"; do pin_newest "$service"; done
+    for service in "${services[@]}"; do
+      if [ "$service" = db ] && restoring && [ -n "$(pinned db)" ]; then pull_pinned db; else pin_newest "$service"; fi
+    done
     return
   fi
   local cached=()
@@ -1665,6 +1738,243 @@ after_reboot() {
     printf '  %s\n' "${todo[@]}"
     echo "Until then, start it after a reboot with: cd $here && $engine compose up -d"
   fi
+}
+
+# The folders of the data folder a backup holds: the originals, the renditions, the originals of an
+# older installation that files links to, and the modules, whose folder is the list of what is
+# installed. The database's folder is in it as a dump; the model is downloaded again, and the rest
+# made again. In files, albums is the Album folders module's, second names for the originals that
+# it makes again, and in modules what an install left half done.
+BACKED_UP=(files files-volatile old modules)
+backed_up_rsync() { rsync -a --numeric-ids --exclude=/albums --exclude='/.staging-*' --exclude='/.replaced-*' "$@"; }
+
+# The folders named of those a backup holds copied from one folder to another, a folder of each name
+# in both, with rsync's options given; a file the same in the folder of that name in the third, an
+# earlier backup, is a hard link to it there. A file that went while it was copied is left out, and
+# said: rsync's 24.
+copy_backed_up() {
+  local from=$1 to=$2 base=$3 names=$4 name status link
+  shift 4
+  for name in $names; do
+    [ -d "$from/$name" ] || continue
+    mkdir -p "$to/$name"
+    link=()
+    [ -z "$base" ] || [ ! -d "$base/$name" ] || link=(--link-dest="$base/$name")
+    status=0
+    backed_up_rsync "$@" "${link[@]}" "$from/$name/" "$to/$name/" || status=$?
+    [ "$status" = 0 ] || [ "$status" = 24 ] || fail "$from/$name could not be copied to $to/$name: rsync's output above says why"
+  done
+}
+
+# EiN into a folder of its own in DIR, named by the time it began, with DIR/latest pointing at it:
+#
+#   ein.dump    the database, pg_dump's custom format, with the content EiN keeps in it
+#   env         .env, with the passwords nothing else keeps, and ems.keys beside it when there is one
+#   about       when, from where, and the TimescaleDB version the dump loads into
+#   files …     the data folder's folders in BACKED_UP
+#
+# A file the backup before it holds unchanged is a hard link to it there, so each backup takes the
+# room of what changed, while each is whole by itself; --keep N removes all but the newest N. A
+# backup is in .<time>.partial until it is complete.
+#
+# The database and the files are of one moment. The files are copied while EiN runs; then EiN is
+# held still, paused, while what changed is copied again and the dump begins, and goes on as soon as
+# the dump holds its snapshot. The pause is as long as rsync takes to look through the files once
+# more: seconds for a household's, minutes for a million on a spinning disk under load. It is not stopped and started again: EiN changes its tables as it
+# starts, which waits for a dump in progress. Where the engine cannot pause it, EiN is stopped for
+# the whole dump. EiN writes its files in place and removes those it deleted, so the files are no
+# use with a database from another moment.
+backup() {
+  local dir=$1 keep=$2 stamp partial base db status=0 dump timescale
+  [ -f .env ] || fail "there is no installation here to back up: $here has no .env"
+  command -v rsync >/dev/null || fail "--backup copies the files with rsync, which is not installed here"
+  pick_engine
+  set -a && . ./.env && set +a
+  mkdir -p "$dir"
+  dir=$(cd "$dir" && pwd)
+  [[ $dir/ != "$EIN_DATA"/* ]] || fail "the backup goes outside the data folder, $EIN_DATA: $dir is in it"
+  db=$("$engine" ps -q --filter label=com.docker.compose.project=ein --filter label=com.docker.compose.service=db | head -1)
+  [ -n "$db" ] || fail "the database is not running, and a backup dumps it: start EiN first, $engine compose up -d"
+  timescale=$(db_query "$db" ein "SELECT extversion FROM pg_extension WHERE extname = 'timescaledb'")
+  # A run cut short leaves its folder, which is no backup.
+  rm -rf "$dir"/.*.partial
+  umask 077
+  stamp=$(date +%Y-%m-%d-%H%M%S)
+  partial=$dir/.$stamp.partial
+  base=$(newest_backup "$dir" || true)
+  mkdir -m 700 "$partial"
+
+  step "Copying the files, while EiN runs"
+  copy_backed_up "$EIN_DATA" "$partial" "$base" "${BACKED_UP[*]}"
+  held_core=$("$engine" ps -q --filter label=com.docker.compose.project=ein --filter label=com.docker.compose.service=core | head -1)
+  held=
+  trap release_core EXIT
+  if [ -n "$held_core" ]; then
+    held_since=$SECONDS
+    if "$engine" pause "$held_core" >/dev/null 2>&1; then
+      held=paused
+      step "EiN is paused while what changed is copied and the database's dump begins"
+    else
+      step "EiN is stopped while what changed is copied and the database is dumped: $engine cannot pause it"
+      "$engine" stop -t 60 "$held_core" >/dev/null
+      held=stopped
+    fi
+  fi
+  # old, which EiN only reads, is not looked through again.
+  copy_backed_up "$EIN_DATA" "$partial" "$base" "files files-volatile modules" --delete
+  # A lock EiN holds while it is paused would keep the dump waiting for good.
+  # TimescaleDB's own catalog has the circular foreign keys pg_dump warns of, which its restore steps
+  # take care of (restore_db).
+  "$engine" exec "$db" pg_dump -U ein -d ein -Fc --lock-wait-timeout=60s >"$partial/ein.dump" \
+    2> >(grep -v -e 'circular foreign-key constraints' -e '^pg_dump: \(detail: continuous_agg\|hint: \)' >&2) &
+  dump=$!
+  if [ "$held" = paused ]; then
+    dump_begun "$db" "$dump"
+    release_core
+    echo "EiN goes on after $((SECONDS - held_since)) seconds; the dump goes on beside it"
+  fi
+  wait "$dump" || status=$?
+  [ "$status" = 0 ] || fail "the database's dump failed, and $partial is no backup: the output above says why"
+  [ "$held" != stopped ] || echo "EiN starts again after $((SECONDS - held_since)) seconds"
+  release_core
+  trap - EXIT
+
+  install -m 600 .env "$partial/env"
+  [ ! -f ems.keys ] || install -m 600 ems.keys "$partial/ems.keys"
+  {
+    echo "date=$(date -Iseconds)"
+    echo "host=$(machine_name)"
+    echo "deploy=$here"
+    echo "data=$EIN_DATA"
+    echo "core=${EIN_CORE_VERSION:-$(git -C src/core log -1 --format=%h 2>/dev/null || true)}"
+    echo "db=${EIN_DB_VERSION:-$(git -C src/db log -1 --format=%h 2>/dev/null || true)}"
+    echo "timescaledb=$timescale"
+  } >"$partial/about"
+  mv "$partial" "$dir/$stamp"
+  ln -sfn "$stamp" "$dir/latest"
+  echo "Backed up to $dir/$stamp, with a dump of $(numfmt --to=iec --suffix=B "$(stat -c %s "$dir/$stamp/ein.dump")")"
+  [ -z "$keep" ] || prune_backups "$dir" "$keep"
+}
+
+# EiN going on after a backup held it: unpaused, or started and answering again.
+release_core() {
+  case ${held:-} in
+    paused) "$engine" unpause "$held_core" >/dev/null || echo "EiN could not be unpaused: $engine unpause $held_core" >&2 ;;
+    stopped) "$engine" start "$held_core" >/dev/null && wait_for_ein >/dev/null || echo "EiN did not start again: $engine compose up -d" >&2 ;;
+  esac
+  held=
+}
+
+# Waits until pg_dump, the process given, holds its snapshot and its locks, which it takes before it
+# copies the first table, or has ended.
+dump_begun() {
+  while kill -0 "$2" 2>/dev/null; do
+    [ "$(db_query "$1" postgres "SELECT count(*) FROM pg_stat_activity WHERE application_name = 'pg_dump' AND query LIKE 'COPY %'")" = 0 ] || return 0
+    sleep 1
+  done
+}
+
+# A query's rows, unaligned, in the database's container as its superuser.
+db_query() { "$engine" exec "$1" psql -X -At -v ON_ERROR_STOP=1 -U ein -d "$2" -c "$3"; }
+
+# The newest complete backup in a folder, or the folder itself when it is one; false when there is none.
+newest_backup() {
+  local backup
+  if [ -f "$1/ein.dump" ]; then backup=$1; else backup=$(readlink -f "$1/latest" 2>/dev/null) || return 1; fi
+  [ -f "$backup/ein.dump" ] && [ -f "$backup/env" ] && [ -f "$backup/about" ] || return 1
+  echo "$backup"
+}
+
+# All but the newest of the backups in a folder removed. Their files are read-only where EiN made
+# them so, which removing them needs no more than their folders' write bits for: a file's own bits
+# are those of every backup that links it.
+prune_backups() {
+  local backup
+  for backup in $(find "$1" -mindepth 1 -maxdepth 1 -type d -name '[0-9][0-9][0-9][0-9]-[0-9][0-9]-[0-9][0-9]-[0-9]*' | sort -r | tail -n +$(($2 + 1))); do
+    find "$backup" -type d ! -perm -u+w -exec chmod u+w {} +
+    rm -rf "$backup"
+    echo "Removed the backup $(basename "$backup")"
+  done
+}
+
+# A backup put back: its .env here, with this machine's own settings, and its files in the data
+# folder, replacing what an installation here holds. Then setup.sh runs as an update would, and loads
+# the dump into the database before EiN starts on it (restore_db); a run cut short is finished by the
+# next. On a new machine, --data and --db-dir name the folders, as at an install; an installation here
+# keeps its own, and its engine. The backup's database password does not matter: the database gets the
+# one of .env.
+restore() {
+  local backup data db_dir=$2 name id kept=()
+  backup=$(newest_backup "$1") || fail "$1 holds no backup made by setup.sh --backup: no ein.dump, env and about in it or in its latest"
+  command -v rsync >/dev/null || fail "--restore copies the files with rsync, which is not installed here"
+  pick_engine
+  if [ -f .env ]; then
+    [ -z "$data_dir" ] && [ -z "$db_dir" ] ||
+      fail "--data and --db-dir are for a new machine: the installation here keeps its folders, $(sed -n 's/^EIN_DATA=//p' .env)"
+    for name in EIN_DATA EIN_DB_DIR EIN_ENGINE EIN_HOSTNAME EIN_USER EIN_GPU; do
+      ! grep -q "^$name=" .env || kept+=("$(grep -m1 "^$name=" .env)")
+    done
+    id=$("$engine" ps -q --filter label=com.docker.compose.project=ein --filter label=com.docker.compose.service=core | head -1)
+    [ -z "$id" ] || { echo "Stopping EiN"; "$engine" stop -t 60 "$id" >/dev/null; }
+  else
+    data=${data_dir:-$here/data}
+    mkdir -p "$data"
+    data=$(cd "$data" && pwd)
+    db_dir=${db_dir:-$data/db}
+    [[ $db_dir == /* ]] || fail "--db-dir takes an absolute path: $db_dir"
+    no_earlier_db "${db_dir%/}"
+    kept=("EIN_DATA=$data" "EIN_DB_DIR=${db_dir%/}" "EIN_ENGINE=$engine" "EIN_GPU=$(gpu_here && echo 1 || echo 0)")
+  fi
+  step "Putting back the backup of $(sed -n 's/^date=//p' "$backup/about") from $(sed -n 's/^host=//p' "$backup/about")"
+  install -m 600 "$backup/env" .env
+  # This machine's own: the user EiN runs as and its name are chosen again where they are new, and
+  # the supervisor's socket and user by supervise.
+  for name in EIN_DATA EIN_DB_DIR EIN_ENGINE EIN_HOSTNAME EIN_USER EIN_GPU EIN_SOCKET EIN_SOCKET_GID EIN_SUPERVISOR_USER EIN_DEPLOY; do
+    unset_env "$name"
+  done
+  for name in "${kept[@]}"; do set_env "${name%%=*}" "${name#*=}"; done
+  if [ -f "$backup/ems.keys" ]; then install -m 600 "$backup/ems.keys" ems.keys; else rm -f ems.keys; fi
+  load_env
+  data_folders
+  echo "Copying the files into $EIN_DATA"
+  copy_backed_up "$backup" "$EIN_DATA" "" "${BACKED_UP[*]}" --delete
+  if [ "$(id -u)" = 0 ] && [ "$EIN_USER" != 0:0 ]; then
+    for name in "${BACKED_UP[@]}"; do chown -R "$EIN_USER" "$EIN_DATA/$name/"; done
+  fi
+  mkdir -p "$EIN_DATA/restore"
+  cp "$backup/ein.dump" "$backup/about" "$EIN_DATA/restore/"
+  echo "The files are back; setup.sh now starts EiN on the backup's database"
+  exec "$here/setup.sh"
+}
+
+# Whether a restore waits for its database to be loaded: the dump restore put in the data folder.
+restoring() { [ -f "${EIN_DATA:-/nonexistent}/restore/ein.dump" ]; }
+
+# The dump restore put in the data folder loaded into the database, which has started, in place of
+# its database ein, with TimescaleDB's steps around it; EiN is not running. The TimescaleDB version
+# the dump was made with must be in the database's image, which it is at the release the backup pins
+# (build). The role ein gets the password of .env, which an installation here made its own. Once the
+# dump is in, it goes.
+restore_db() {
+  local db timescale status=0
+  step "Loading the backup's database"
+  container_up db 300 || fail "the database did not come up: $engine compose logs db"
+  db=$(service_container db)
+  timescale=$(sed -n 's/^timescaledb=//p' "$EIN_DATA/restore/about")
+  [[ $timescale =~ ^[0-9][0-9.]*$ ]] || fail "$EIN_DATA/restore/about names no TimescaleDB version: the backup is not whole"
+  [ "$(db_query "$db" postgres "SELECT count(*) FROM pg_available_extension_versions WHERE name = 'timescaledb' AND version = '$timescale'")" = 1 ] ||
+    fail "the backup's database is of TimescaleDB $timescale, which this database image does not have ($(db_query "$db" postgres "SELECT default_version FROM pg_available_extensions WHERE name = 'timescaledb'")): restore it with the release of ein/db the backup's env names, EIN_DB_VERSION"
+  db_query "$db" postgres "DROP DATABASE IF EXISTS ein WITH (FORCE)" >/dev/null
+  db_query "$db" postgres "CREATE DATABASE ein OWNER ein" >/dev/null
+  db_query "$db" ein "CREATE EXTENSION timescaledb VERSION '$timescale'" >/dev/null
+  db_query "$db" ein "SELECT timescaledb_pre_restore()" >/dev/null
+  "$engine" exec -i "$db" pg_restore -U ein -d ein --exit-on-error <"$EIN_DATA/restore/ein.dump" || status=$?
+  db_query "$db" ein "SELECT timescaledb_post_restore()" >/dev/null
+  [ "$status" = 0 ] || fail "the backup's database did not load: pg_restore's output above says why. ./setup.sh tries again"
+  printf '%s\n' "ALTER ROLE ein PASSWORD :'password';" |
+    "$engine" exec -i "$db" psql -X -q -v ON_ERROR_STOP=1 -v "password=$POSTGRES_PASSWORD" -U ein -d postgres
+  rm -rf "$EIN_DATA/restore"
+  echo "The database is the backup's"
 }
 
 step() { printf '\n== %s\n' "$1"; }

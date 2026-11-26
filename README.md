@@ -86,8 +86,34 @@ update after a module's, when EiN's Status page says the media service is too ol
 installation from before releases ran `:main` and lines (`EIN_EMS_TAG`): its first update pins them,
 and removes the images they named.
 
-Back up `.env` and the data folder, which holds the database too, unless `--db-dir` put it
-elsewhere (below).
+## Backup and restore
+
+```bash
+./setup.sh --backup /mnt/backup/ein --keep 14   # a backup in a new folder there, the newest 14 kept
+./setup.sh --restore /mnt/backup/ein            # its newest put back, and EiN started on it
+```
+
+A backup is a folder named by the time it began, such as `2026-11-26-033000`, beside `latest`, which
+points at the newest: the database as a dump (`ein.dump`), `.env` and `ems.keys` (`env`), and of the
+data folder `files`, `files-volatile` (the renditions), `old` and `modules`. A file the backup
+before holds unchanged is a hard link to it there, so a backup takes the room of what changed while
+each is whole on its own; `--keep N` removes all but the newest N. The model, `src/` and
+`compose.override.yaml` are made again, and with the Album folders module its folders in
+`files/albums`. It needs `rsync`, and it backs up a running EiN: the files are copied while EiN runs,
+then EiN is paused while what changed is copied and the dump takes its snapshot, which is as long
+as rsync takes to look through the files again (seconds for a family's archive, minutes for a
+million files on a busy spinning disk), and goes on while the dump is written. Where the engine cannot pause it, EiN is stopped
+until the dump is done. Put it on another disk, and on a timer of your own: the documentation's
+[Your data](https://einhq.eu/docs/admin/data.html) has one, and how to copy the backups off the
+machine, encrypted.
+
+`--restore DIR` takes the newest backup in `DIR`, or the backup `DIR` is. Here, it replaces the
+database and the files of the installation with the backup's; on a new machine, in a fresh clone of
+this repository, it installs EiN from the backup, with `--data`, `--db-dir` and `--engine` as at an
+install. It puts back `.env` with this machine's own settings in it, copies the files into the data
+folder, and runs `setup.sh`, which loads the dump into the database before EiN starts on it, keeping
+the database at the release the backup names, since a dump loads only into the TimescaleDB it was
+made with. A run cut short is finished by `./setup.sh`.
 
 ## The supervisor
 
@@ -139,7 +165,9 @@ Port 8080 is the web interface and 2222 SSH and SFTP, on every address of the ma
 something else on the machine has one, `setup.sh` takes the next free port and says so. Set
 `EIN_BIND=127.0.0.1` in `.env` to keep them to the machine behind an HTTPS proxy of your own. The
 database, the media service and the model are reached only by EiN, on the compose network; the
-database is on a network of its own beside it, which EiN alone joins, isolated from the other.
+database is on a network of its own beside it, which EiN alone joins, isolated from the other. Each
+wants a secret `setup.sh` made in `.env`: the database `POSTGRES_PASSWORD`, the media service
+`EMS_KEY`, and the model `LLM_KEY`, which each run of `setup.sh` adds to a `.env` that lacks it.
 
 A program on another machine that uses the media service, such as a scanning station, reaches it
 when `.env` sets `EIN_EMS_BIND` to this machine's address on your network (or `0.0.0.0`): the media
@@ -225,7 +253,7 @@ that organisation's modules.
 ## The database
 
 The database is the folder `db` in the data folder, which a new install writes as `EIN_DB_DIR` in
-`.env`, so a backup of the data folder holds it. `--db-dir` names another folder for it. On a machine
+`.env`. `--db-dir` names another folder for it. On a machine
 whose large disk is a spinning one, put it on the SSD: searching the archive reads its vector indexes
 at random, a few milliseconds a page on an SSD and tens of milliseconds on a spinning disk under load.
 An install whose `EIN_DB_DIR` is empty keeps it in the `ein_db` volume, in the container engine's
@@ -238,13 +266,8 @@ storage.
 setup.sh gives the folder to the database image's postgres user before the database starts, so under
 rootless podman it belongs to one of your subordinate ids: look into it with `podman unshare ls`. It
 takes an empty folder, or one a database is in. A database already in the volume is not left
-behind: setup.sh says how to copy it over first. A copy of the folder is a backup only while the
-database is stopped (`podman compose stop db`), and under rootless podman it is read with `podman
-unshare`. A dump is one while it runs, wherever it is:
-
-```bash
-podman compose exec db pg_dump -U ein -Fc ein >ein.dump
-```
+behind: setup.sh says how to copy it over first. A copy of the folder is no backup while the
+database runs; `./setup.sh --backup` dumps it, wherever it is (above).
 
 ## Settings
 
@@ -263,10 +286,16 @@ with no capability of its own, which only the setuid `fusermount3` and Chromium'
 (`compose.ems.yaml` names them all), does not reach the database, and of `.env` gets its `EMS_`
 lines and `TZ` alone, which `./setup.sh` names to it. `./setup.sh` writes the address: EiN's name on the
 compose network, or, when EiN has a network of its own under rootless podman, this machine's address
-(`host.containers.internal`), where it publishes `CFG_EMS_FILES_PORT` (2224) on `EIN_BIND`. A media
-service on another machine is `CFG_EMS_FILES_ADDRESS` in `.env`, the `host:port` it reaches this
-machine at, and `./setup.sh` publishes the port for it. The kernel reads ahead only
-128 KiB on such a mount; on the machine the media service runs on, a udev rule raises it for every
+(`host.containers.internal`), where it publishes `CFG_EMS_FILES_PORT` (2224) on `EIN_BIND`.
+
+EiN uses a media service on another machine instead of `--ems` with three lines in `.env`, examples
+of which are in the file: `CFG_EMS_URL`, its address; `EMS_KEY`, the key of this EiN among its
+callers, a line in that service's `ems.keys`; and `CFG_EMS_FILES_ADDRESS`, the `host:port` it
+reaches this machine's `ems-files` at. `./setup.sh` publishes that port on `EIN_BIND`, so that
+machine reaches it there; with `EIN_BIND=127.0.0.1`, a compose file of your own beside the others
+(named in `COMPOSE_FILE` in `.env`) publishes it on an address that machine reaches as well.
+
+The kernel reads ahead only 128 KiB on such a mount; on the machine the media service runs on, a udev rule raises it for every
 new one, a moment after the mount, when the setting holds:
 
 ```bash

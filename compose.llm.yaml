@@ -27,8 +27,10 @@
 # (--chat-template-kwargs), so requests carry only standard fields. A hosted model in its place
 # (CFG_LLM_URL) brings its own template and defaults.
 #
-# The health check asks the server's port: the image's own asks 8080, which nothing serves here.
-# Its start period covers the first start, which fetches the model.
+# It answers only a request with its key, LLM_KEY, which setup.sh makes in .env and gives EiN as
+# CFG_LLM_KEY; llama.cpp reads it from LLAMA_API_KEY, which keeps it off the command line. The
+# health check asks the server's port, where /health needs no key: the image's own asks 8080, which
+# nothing serves here. Its start period covers the first start, which fetches the model.
 services:
   llm:
     image: ${LLM_IMAGE:-ghcr.io/ggml-org/llama.cpp:server-cuda@sha256:bfb3264fc2166e01e2b4f9b537e45d7006d87c75021b911f132ef607f5bbced3}
@@ -41,6 +43,7 @@ services:
       start_period: 900s
     environment:
       LLAMA_CACHE: /models
+      LLAMA_API_KEY: ${LLM_KEY:?run setup.sh, which writes .env}
       LLM_CARD_RESERVE_MB: ${LLM_CARD_RESERVE_MB:-8800}
     mem_limit: ${LLM_MEMORY:-10g}
     memswap_limit: ${LLM_MEMORY:-10g}
