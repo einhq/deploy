@@ -78,12 +78,13 @@ instead (below). The model's is llama.cpp's own, named by digest in `compose.llm
 `EIN_EMS_VERSION`, `EIN_DEVICES_VERSION` and `EIN_SUPERVISOR_VERSION`, which the compose files
 read. A run pins each to the newest release on GitHub's registry and pulls it: EiN and the database
 the newest of all, the supervisor this folder's own, and the media service and the sidecar the
-newest of the line the modules installed in the data folder ask for in their `mod.json`
-(`"services": { "ems": "^0.4.4" }`: the newest 0.4). A run after EiN comes up pins a line its
-modules ask for then, and restarts that service; a line not published yet leaves the service at the
-version it has. `./setup.sh --only ems` is the update after a module's, when EiN's Status page says
-the media service is too old for it. An installation from before releases ran `:main` and lines
-(`EIN_EMS_TAG`): its first update pins them, and removes the images they named.
+newest release the modules installed in the data folder take, of the line they ask for in their
+`mod.json` and no older than the version (`"services": { "ems": "^0.4.4" }`: the newest 0.4, 0.4.4
+or later). A run after EiN comes up pins what its modules ask for then, and restarts that service; a
+release not published yet leaves the service at the version it has. `./setup.sh --only ems` is the
+update after a module's, when EiN's Status page says the media service is too old for it. An
+installation from before releases ran `:main` and lines (`EIN_EMS_TAG`): its first update pins them,
+and removes the images they named.
 
 Back up `.env` and the data folder, which holds the database too, unless `--db-dir` put it
 elsewhere (below).
@@ -105,9 +106,10 @@ own paths, which goes on while the supervisor is made again; its output is in `s
 data folder. Once an hour it reads which releases GitHub's registry has, and says of each service
 the newer release an update would install, when there is one; the model has one when
 `compose.llm.yaml` names another image than it runs. Unasked, it updates the media service or the
-sidecar within a minute of a module asking for another line of it, and each night at
-`EIN_UPDATE_AT` (04:00; `off` for never) every service that has an update. Its updates leave a
-service that runs its newest release as it is.
+sidecar within a minute of a module asking for a version it does not run, another line or a newer
+patch (`^0.4.6` while it runs 0.4.4), and each night at `EIN_UPDATE_AT` (04:00; `off` for never)
+every service that has an update. Its updates leave a service that runs its newest release as it
+is.
 
 With the supervisor, every `setup.sh` runs in its image, the one run here too: this machine needs the
 engine and its socket alone (setup.sh turns on `podman.socket` under podman), and the services are

@@ -22,13 +22,13 @@ status reports a job that went on while this container was made again.
 Each service runs a release, an image GitHub builds once for it, at the version .env pins
 (EIN_CORE_VERSION and the like). Once an hour the supervisor reads which releases GitHub's registry
 has, and a service has an update when a newer one is there than the one it runs: the newest of the
-line its modules ask for (mod.json's services, `"ems": "^0.4.4"`) for the media service and the
-sidecar, the newest of all for EiN and the database, and deploy's newest release for the supervisor.
-The language model has one when compose.llm.yaml names another image than it runs.
+line its modules ask for (mod.json's services, `"ems": "^0.4.4"`: 0.4.4 or a newer 0.4) for the media
+service and the sidecar, the newest of all for EiN and the database, and deploy's newest release for
+the supervisor. The language model has one when compose.llm.yaml names another image than it runs.
 
-Without being asked, once a minute: a service whose modules now ask for another line of it is
-updated, and every service with an update is at EIN_UPDATE_AT (.env, default 04:00, `off` for
-never), in the hour after it.
+Without being asked, once a minute: a service whose version its modules no longer take, another line
+or an older patch than one asks for, is updated, and every service with an update is at
+EIN_UPDATE_AT (.env, default 04:00, `off` for never), in the hour after it.
 
 `supervisor job <setup.sh options>` is the job itself, run in that container.
 """
@@ -228,7 +228,8 @@ def line_of(version):
 
 
 def wanted_lines(env):
-    """Each service a module names: the newest line asked for, and who asks what."""
+    """Each service a module names: the newest line asked for, the highest version asked for in it
+    (`^0.6` asks for 0.6), and who asks what."""
     asked = {}
     for manifest in sorted(Path(env.get('EIN_DATA') or DEPLOY / 'data').glob('modules/*/mod.json')):
         try:
@@ -241,7 +242,8 @@ def wanted_lines(env):
     wanted = {}
     for service, modules in asked.items():
         lines = sorted({line_of(each['range'][1:]) for each in modules}, key=version_key)
-        wanted[service] = {'line': lines[-1], 'modules': modules}
+        least = max((each['range'][1:] for each in modules if line_of(each['range'][1:]) == lines[-1]), key=version_key)
+        wanted[service] = {'line': lines[-1], 'least': least, 'modules': modules}
     return wanted
 
 
@@ -276,13 +278,17 @@ def refresh():
     checked['error'] = '; '.join(errors) or None
 
 
+def meets(version, asked):
+    """Whether a version is in the line its modules ask for, at the version asked or above."""
+    return line_of(version) == asked['line'] and version_key(version) >= version_key(asked['least'])
+
+
 def newest(name, wanted):
-    """The newest release of a service, of the line its modules ask for (the media service and the
+    """The newest release of a service, of those its modules take (the media service and the
     sidecar), or None when none is known."""
     versions = releases.get(name) or []
-    line = (wanted.get(name) or {}).get('line')
-    if name in ('ems', 'devices') and line:
-        versions = [version for version in versions if line_of(version) == line]
+    if name in ('ems', 'devices') and name in wanted:
+        versions = [version for version in versions if meets(version, wanted[name])]
     return versions[-1] if versions else None
 
 
@@ -413,8 +419,8 @@ def run_job(args):
     return code
 
 
-# Unasked: the registry read again, a service whose modules ask for another line, and the nightly
-# update.
+# Unasked: the registry read again, a service whose modules do not take the version it runs, and the
+# nightly update.
 
 tried = {}
 
@@ -433,13 +439,15 @@ def tick():
         service = describe(name, env, listed, wanted)
         newer = (service.get('available') or {}).get('version')
         running = service.get('version')
-        if not newer or (running and line_of(running) == line_of(newer)):
+        asked = wanted.get(name)
+        if not newer or not asked or (running and meets(running, asked)):
             continue
         # A release that did not come up is tried again a day later.
         if time.time() - tried.get((name, newer), 0) < 86400:
             continue
         tried[(name, newer)] = time.time()
-        start_job(['--only', name], f'the supervisor: the modules ask for {TITLES[name]} {line_of(newer)}')
+        modules = [each['module'] for each in asked['modules'] if each['range'][1:] == asked['least']]
+        start_job(['--only', name], f"the supervisor: {' and '.join(modules)} {'asks' if len(modules) == 1 else 'ask'} for {TITLES[name]} ^{asked['least']}")
         return
     at = env.get('EIN_UPDATE_AT', '04:00')
     match = re.match(r'^(\d{1,2}):(\d{2})$', at)

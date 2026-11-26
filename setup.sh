@@ -56,11 +56,11 @@
 # From GitHub's einhq every service runs a release, an image GitHub builds once for it and never
 # again, at the version .env pins: EIN_CORE_VERSION, EIN_DB_VERSION, EIN_EMS_VERSION,
 # EIN_DEVICES_VERSION and EIN_SUPERVISOR_VERSION (ghcr.io/einhq/core:0.1.1). A run pins each to the
-# newest release GitHub's registry has: the media service and the sidecar the newest of the line the
-# installed modules ask for in their mod.json (`"services": { "ems": "^0.4.4" }`: the line 0.4), and
-# the supervisor the release of this folder. A run after a module's update in EiN pins the line it
-# asks for then. This folder itself is moved to the newest release of deploy whose supervisor
-# GitHub has built.
+# newest release GitHub's registry has: the media service and the sidecar the newest the installed
+# modules take, of the line they ask for in their mod.json and no older than the version (`"services":
+# { "ems": "^0.4.4" }`: 0.4.4 or a newer 0.4), and the supervisor the release of this folder. A run
+# after a module's update in EiN pins what it asks for then. This folder itself is moved to the
+# newest release of deploy whose supervisor GitHub has built.
 #
 # --only puts a service whose new image does not come up back on the version it ran, and fails,
 # saying so. Run by the supervisor (EIN_KEEP_CURRENT=1), it leaves a service that runs its newest
@@ -469,22 +469,25 @@ line_of() {
   if [ "$major" = 0 ]; then echo "0.${rest%%.*}"; else echo "$major"; fi
 }
 
-# The line of a service the installed modules ask for, nothing when none names it. Modules that ask
-# for different lines are said, and the newest is taken: the older module's checks then say it is
-# out of date.
-wanted_line() {
-  local module service version lines=() asked=()
+# The version of a service the installed modules ask for, the highest asked for (0.6.3 for ^0.6.1 and
+# ^0.6.3), nothing when none names it. Modules that ask for different lines are said, and the newest
+# is taken: the older module's checks then say it is out of date.
+wanted_version() {
+  local module service version versions=() asked=()
   while read -r module service version; do
     [ "$service" = "$1" ] || continue
     asked+=("$module ^$version")
-    lines+=("$(line_of "$version")")
+    versions+=("$version")
   done < <(modules_services)
-  [ ${#lines[@]} != 0 ] || return 0
-  if [ "$(printf '%s\n' "${lines[@]}" | sort -u | wc -l)" -gt 1 ]; then
+  [ ${#versions[@]} != 0 ] || return 0
+  if [ "$(for version in "${versions[@]}"; do line_of "$version"; done | sort -u | wc -l)" -gt 1 ]; then
     echo "The modules ask for different versions of $1 ($(IFS=,; echo "${asked[*]}" | sed 's/,/, /g')); the newest is taken" >&2
   fi
-  printf '%s\n' "${lines[@]}" | sort -V | tail -1
+  printf '%s\n' "${versions[@]}" | sort -V | tail -1
 }
+
+# Whether version $1 is what modules asking for ^$2 take: of $2's line, and $2 or newer.
+meets() { [ "$(line_of "$1")" = "$(line_of "$2")" ] && version_at_most "$2" "$1"; }
 
 # The version of a service's source under src/, which a built image has: the media service's
 # version.json, the sidecar's.
@@ -495,19 +498,19 @@ source_version() {
   esac
 }
 
-# Each service installed here pinned to the newest release of the line its modules ask for, once EiN
-# has installed them, and started again when that moved it. Built, the source is main's: what it is
-# and what the modules ask for are only compared.
+# Each service installed here pinned to the newest release its modules take, once EiN has installed
+# them, and started again when that moved it. Built, the source is main's: what it is and what the
+# modules ask for are only compared.
 follow_modules() {
-  local service option line version
+  local service option wanted version
   for service in ems devices; do
     option=EIN_${service^^}
     [ "${!option:-0}" = 1 ] || continue
     if built; then
-      line=$(wanted_line "$service")
+      wanted=$(wanted_version "$service")
       version=$(source_version "$service")
-      [ -z "$line" ] || [ -z "$version" ] || [ "$(line_of "$version")" = "$line" ] ||
-        echo "The modules here ask for $service $line, and its source is $version: their checks in EiN say which is behind"
+      [ -z "$wanted" ] || [ -z "$version" ] || meets "$version" "$wanted" ||
+        echo "The modules here ask for $service ^$wanted, and its source is $version: their checks in EiN say which is behind"
       continue
     fi
     version=$(pinned "$service")
@@ -534,20 +537,20 @@ version_at_most() { [ "$(printf '%s\n%s\n' "$1" "$2" | sort -V | head -1)" = "$1
 # This folder's release, its version.json.
 deploy_version() { json_field version version.json; }
 
-# The release a service is to run, of those published: the newest of the line its modules ask for
-# (the media service and the sidecar; the newest of all when none asks), this folder's or the newest
+# The release a service is to run, of those published: the newest its modules take (the media
+# service and the sidecar; the newest of all when none asks), this folder's or the newest
 # before it (the supervisor, built from it), the newest of all (EiN and its database). Nothing when
 # none is; false when the registry does not answer.
 newest_release() {
-  local versions line
+  local versions wanted version
   versions=$(published_versions "$1") || return 1
   case $1 in
     ems | devices)
-      line=$(wanted_line "$1")
-      [ -z "$line" ] || versions=$(grep -E "^${line//./\\.}\." <<<"$versions" || true)
+      wanted=$(wanted_version "$1")
+      [ -z "$wanted" ] || versions=$(for version in $versions; do ! meets "$version" "$wanted" || echo "$version"; done)
       ;;
     supervisor)
-      local version kept=()
+      local kept=()
       for version in $versions; do ! version_at_most "$version" "$(deploy_version)" || kept+=("$version"); done
       versions=$(printf '%s\n' "${kept[@]}")
       ;;
@@ -565,14 +568,14 @@ pin() {
 }
 
 # A service pinned to its newest release, and its image pulled. Where the registry does not answer,
-# or has no release of the line its modules ask for (yet: a module's release can come before its
-# service's image), it stays at the version it has, and says so; a service with none fails.
+# or has no release its modules take (yet: a module's release can come before its service's image),
+# it stays at the version it has, and says so; a service with none fails.
 pin_newest() {
   local newest
   if ! newest=$(newest_release "$1"); then
     echo "GitHub's registry did not answer for $1$([ -z "$(pinned "$1")" ] || echo ": it stays at $(pinned "$1")")"
-  elif [ -z "$newest" ] && [ -n "$(wanted_line "$1")" ]; then
-    echo "The modules here ask for $1 $(wanted_line "$1"), which is not published yet$([ -z "$(pinned "$1")" ] || echo ": it stays at $(pinned "$1")")"
+  elif [ -z "$newest" ] && [ -n "$(wanted_version "$1")" ]; then
+    echo "The modules here ask for $1 ^$(wanted_version "$1"), which is not published yet$([ -z "$(pinned "$1")" ] || echo ": it stays at $(pinned "$1")")"
   elif [ -n "$newest" ] && [ "$newest" != "$(pinned "$1")" ]; then
     echo "  $1 $newest$([ -z "$(pinned "$1")" ] || echo ", after $(pinned "$1")")"
     pin "$1" "$newest"
