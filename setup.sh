@@ -12,6 +12,9 @@
 #   ./setup.sh --no-ems --no-llm  leave an option out again (--no-devices too); its data stays
 #   ./setup.sh --only core        update one service, core, ems, db, llm, devices or supervisor, and
 #                                 restart only it; --only core,db several, one after another
+#   ./setup.sh --core-version X   update EiN to its release X instead of the newest, as EiN asks when
+#                                 it cannot update from the one here at once: --only core
+#                                 --core-version 0.4.0, then ./setup.sh again for the newest
 #   ./setup.sh --no-supervisor    leave the supervisor out, which installs and updates the services
 #                                 when EiN asks; --supervisor adds it again
 #   ./setup.sh --source URL       fetch the sources and the modules from this organisation instead
@@ -88,6 +91,7 @@ cd "$here"
 main() {
   local args=("$@") want_ems= want_llm= want_devices= modules=() source= insecure= db_dir= only= key=${EIN_SOURCE_KEY:-} options=0 unknown=
   local http_port= ssh_port= bind= want_supervisor= updating= backup_dir= restore_dir= keep=
+  core_version=
   data_dir= want_engine=
   while [ $# -gt 0 ]; do
     case $1 in
@@ -148,6 +152,12 @@ main() {
         keep=$2
         shift
         ;;
+      --core-version)
+        [ $# -ge 2 ] && [[ $2 =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]] || fail "--core-version takes a release of EiN, such as 0.4.0"
+        core_version=$2
+        shift 2
+        continue
+        ;;
       --only)
         [ $# -ge 2 ] || fail "--only needs a service: core, ems, db, llm, devices or supervisor"
         only=$2
@@ -169,6 +179,7 @@ main() {
   # A backup and a restore are of the installation as it is: this folder is not updated first.
   if [ -n "$backup_dir$restore_dir" ]; then
     [ -z "$unknown" ] || fail "unknown option $unknown (--help lists them)"
+    [ -z "$core_version" ] || fail "--core-version updates EiN, and a backup and a restore leave it as it is"
     [ -z "$backup_dir" ] || [ -z "$restore_dir" ] || fail "--backup and --restore go one at a time"
   fi
   if [ -n "$backup_dir" ]; then
@@ -190,9 +201,11 @@ main() {
   pick_compose
   if [ -n "$only" ]; then
     [ "$options" = 0 ] || fail "--only updates what is installed: give the other options without it"
+    [ -z "$core_version" ] || [[ ,$only, == *,core,* ]] || fail "--core-version updates core: --only core --core-version $core_version"
     [ -f .env ] || fail "--only updates an installation: run ./setup.sh first"
     load_env
     ! restoring || fail "a restore is not finished here: ./setup.sh finishes it"
+    check_core_version
     # podman-compose 1.0 hashes the whole project's config: after a change to any compose file, or
     # to a version .env pins, starting one service makes every container again, with that one's
     # swap limit, which the database's start refuses. So the services named are pinned first, and
@@ -211,6 +224,7 @@ main() {
     fi
     if [ "$compose_tool" != podman-compose ] || [ "$(config_hash)" = "$(running_hash)" ]; then
       for service in ${only//,/ }; do update_one "$service"; done
+      core_version_note
       return
     fi
     echo "The compose files changed, so every service is started again, and ${only//,/ and } updated"
@@ -238,6 +252,7 @@ main() {
   [ -z "$key" ] || set_env EIN_SOURCE_KEY "$key"
   [ -z "$db_dir" ] || set_db_dir "$db_dir"
   load_env
+  check_core_version
   module_sources
   [ "$EIN_DEVICES" != 1 ] || devices_secrets
   check_devices_bind
@@ -302,6 +317,7 @@ main() {
   [ -n "${EIN_SUPERVISOR_JOB:-}" ] || after_reboot
   modules_report
   modules_need
+  core_version_note
 }
 
 # One service fetched, built and restarted, the others left running: an update of EiN alone does not
@@ -585,8 +601,9 @@ deploy_version() { json_field version version.json; }
 
 # The release a service is to run, of those published: the newest its modules take (the media
 # service and the sidecar; the newest of all when none asks), this folder's or the newest
-# before it (the supervisor, built from it), the newest of all (EiN and its database). Nothing when
-# none is; false when the registry does not answer.
+# before it (the supervisor, built from it), the newest of all (the database, and EiN but with
+# --core-version, which check_core_version found published). Nothing when none is; false when the
+# registry does not answer.
 newest_release() {
   local versions wanted version
   versions=$(published_versions "$1") || return 1
@@ -595,6 +612,7 @@ newest_release() {
       wanted=$(wanted_version "$1")
       [ -z "$wanted" ] || versions=$(for version in $versions; do ! meets "$version" "$wanted" || echo "$version"; done)
       ;;
+    core) [ -z "$core_version" ] || versions=$core_version ;;
     supervisor)
       local kept=()
       for version in $versions; do ! version_at_most "$version" "$(deploy_version)" || kept+=("$version"); done
@@ -628,6 +646,24 @@ pin_newest() {
   fi
   [ -n "$(pinned "$1")" ] || fail "no release of $1 could be had from GitHub's registry"
   pull_pinned "$1"
+}
+
+# --core-version checked against what is published and what runs: a release GitHub's registry has,
+# and not older than the one here, since the database is changed in place as EiN starts and going
+# back is restoring the backup from before the update. Built, fetch checks its tag the same way.
+check_core_version() {
+  [ -n "$core_version" ] && ! built || return 0
+  local versions
+  versions=$(published_versions core) || fail "GitHub's registry did not answer, so EiN's release $core_version could not be had"
+  grep -qxF "$core_version" <<<"$versions" || fail "EiN has no release $core_version on GitHub's registry; its newest is $(tail -1 <<<"$versions")"
+  [ -z "$(pinned core)" ] || [ "$(pinned core)" = "$core_version" ] || ! version_at_most "$core_version" "$(pinned core)" ||
+    fail "EiN runs $(pinned core) here, newer than $core_version: an update goes forward, and going back is restoring the backup from before it (./setup.sh --restore)"
+}
+
+# After --core-version, what comes next.
+core_version_note() {
+  [ -n "$core_version" ] || return 0
+  echo "EiN runs its release $core_version. Run ./setup.sh again to update it to the newest"
 }
 
 # A service's image at the version .env pins, pulled when it is not here. A release is never built
@@ -1518,16 +1554,34 @@ write_override() {
 }
 
 # A repository cloned the first time and moved to its newest commit after, so a run is an update.
-# Its origin follows the source, so a new --source takes effect at the next pull.
+# Its origin follows the source, so a new --source takes effect at the next pull. Core with
+# --core-version is moved to that release's tag instead, and the next run takes it back to its
+# branch.
 fetch() {
   if [ -d "$2/.git" ]; then
     git -C "$2" remote set-url origin "$EIN_SOURCE/$1.git"
-    git_source -C "$2" fetch --quiet origin
-    git -C "$2" merge --ff-only --quiet '@{upstream}'
+    git_source -C "$2" fetch --quiet --tags origin
+    if [ "$1" = core ] && [ -n "$core_version" ]; then
+      release_tag "$2"
+      git -C "$2" merge-base --is-ancestor HEAD "v$core_version" ||
+        fail "EiN here is newer than its release $core_version: an update goes forward, and going back is restoring the backup from before it (./setup.sh --restore)"
+    else
+      git -C "$2" symbolic-ref -q HEAD >/dev/null ||
+        git -C "$2" checkout --quiet "$(git -C "$2" symbolic-ref --short refs/remotes/origin/HEAD | sed 's|^origin/||')"
+      git -C "$2" merge --ff-only --quiet '@{upstream}'
+    fi
   else
     git_source clone --quiet "$EIN_SOURCE/$1.git" "$2"
+    [ "$1" != core ] || [ -z "$core_version" ] || release_tag "$2"
   fi
+  [ "$1" != core ] || [ -z "$core_version" ] || git -C "$2" checkout --quiet --detach "v$core_version"
   echo "  $1 $(git -C "$2" log -1 --format='%h %cs')"
+}
+
+# Whether the clone of core in $1 has the tag of --core-version's release.
+release_tag() {
+  git -C "$1" rev-parse -q --verify "refs/tags/v$core_version^{commit}" >/dev/null ||
+    fail "EiN has no release $core_version at $EIN_SOURCE/core: its releases are its tags v<x.y.z>"
 }
 
 # git with the source's token as a header, given in the environment of this call alone: it is not

@@ -26,6 +26,9 @@ any time after:
 ./setup.sh                    # update: this folder and the newest releases, pulled and restarted
 ./setup.sh --only core        # update one service, core, ems, db, llm, devices or supervisor, and restart
                               # only it; --only core,db several
+./setup.sh --only core --core-version 0.4.0
+                              # EiN's release 0.4.0 instead of the newest, as EiN asks when it cannot update
+                              # from the one here at once; ./setup.sh again then takes it to the newest
 ./setup.sh --no-supervisor    # leave the supervisor out (below); --supervisor adds it again
 ./setup.sh --http-port 8081   # the web interface's port; --ssh-port SSH and SFTP's
 ./setup.sh --bind 127.0.0.1   # listen on this machine alone, behind an HTTPS proxy of your own
